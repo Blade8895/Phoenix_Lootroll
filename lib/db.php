@@ -1,6 +1,9 @@
 <?php
 declare(strict_types=1);
 
+const DATA_DIR = __DIR__ . '/../data';
+const DB_FILE = DATA_DIR . '/loot.sqlite';
+
 function db(): PDO
 {
     static $pdo = null;
@@ -8,17 +11,25 @@ function db(): PDO
         return $pdo;
     }
 
-    $dir = __DIR__ . '/../data';
-    if (!is_dir($dir)) {
-        mkdir($dir, 0775, true);
+    if (!extension_loaded('pdo_sqlite')) {
+        throw new RuntimeException('Die PHP-Erweiterung pdo_sqlite ist nicht installiert.');
+    }
+    if (!is_dir(DATA_DIR) && !@mkdir(DATA_DIR, 0775, true)) {
+        throw new RuntimeException('Der Ordner data/ fehlt und konnte nicht angelegt werden.');
+    }
+    // SQLite braucht Schreibrechte auf den Ordner (Journal-Datei) und die Datei selbst.
+    if (!is_writable(DATA_DIR)) {
+        throw new RuntimeException('Der Ordner data/ ist für PHP nicht beschreibbar (Rechte z. B. 775 oder 777 setzen).');
+    }
+    if (is_file(DB_FILE) && !is_writable(DB_FILE)) {
+        throw new RuntimeException('Die Datei data/loot.sqlite ist für PHP nicht beschreibbar.');
     }
 
-    $pdo = new PDO('sqlite:' . $dir . '/loot.sqlite', null, null, [
+    $pdo = new PDO('sqlite:' . DB_FILE, null, null, [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
     ]);
     $pdo->exec('PRAGMA foreign_keys = ON');
-    $pdo->exec('PRAGMA journal_mode = WAL');
     $pdo->exec('PRAGMA busy_timeout = 5000');
 
     $pdo->exec("
@@ -51,5 +62,18 @@ function db(): PDO
         CREATE INDEX IF NOT EXISTS idx_rolls_item ON rolls(item_id);
     ");
 
+    // Spalten, die nach der ersten Version dazugekommen sind.
+    add_column($pdo, 'lists', 'deadline', 'INTEGER NULL');
+    add_column($pdo, 'lists', 'archived', 'INTEGER NOT NULL DEFAULT 0');
+    add_column($pdo, 'items', 'done', 'INTEGER NOT NULL DEFAULT 0');
+
     return $pdo;
+}
+
+function add_column(PDO $pdo, string $table, string $column, string $definition): void
+{
+    $columns = array_column($pdo->query("PRAGMA table_info($table)")->fetchAll(), 'name');
+    if (!in_array($column, $columns, true)) {
+        $pdo->exec("ALTER TABLE $table ADD COLUMN $column $definition");
+    }
 }

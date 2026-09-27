@@ -1,30 +1,65 @@
 <?php
 declare(strict_types=1);
 
-require __DIR__ . '/lib/db.php';
-require __DIR__ . '/lib/components.php';
-
+// Fehler nie als HTML ausgeben – das Frontend erwartet immer JSON.
+ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 
-const ROLL_MAX = ['main' => 100, 'twink' => 50];
+set_error_handler(function (int $severity, string $message, string $file, int $line): bool {
+    if (!(error_reporting() & $severity) || ($severity & (E_DEPRECATED | E_USER_DEPRECATED))) {
+        return false;
+    }
+    throw new ErrorException($message, 0, $severity, $file, $line);
+});
 
-function respond(array $data, int $status = 200): never
+set_exception_handler(function (Throwable $e): void {
+    error_log('[lootroll] ' . $e);
+    if (!headers_sent()) {
+        http_response_code(500);
+        header('Content-Type: application/json; charset=utf-8');
+    }
+    echo json_encode(['error' => 'Serverfehler: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE);
+});
+
+require __DIR__ . '/lib/db.php';
+require __DIR__ . '/lib/components.php';
+
+const ROLL_MAX = ['main' => 100, 'twink' => 50];
+const MAX_DEADLINE_DAYS = 365;
+
+/** @return no-return */
+function respond(array $data, int $status = 200): void
 {
     http_response_code($status);
     echo json_encode($data, JSON_UNESCAPED_UNICODE);
     exit;
 }
 
-function fail(string $message, int $status = 400): never
+/** @return no-return */
+function fail(string $message, int $status = 400): void
 {
     respond(['error' => $message], $status);
 }
 
-function clean_text(mixed $value, int $max): string
+// mbstring ist nicht auf jedem Webspace installiert – daher mit Fallback.
+function str_cut(string $value, int $max): string
+{
+    if (function_exists('mb_substr')) {
+        return mb_substr($value, 0, $max, 'UTF-8');
+    }
+    return preg_match('/^.{0,' . $max . '}/us', $value, $m) ? $m[0] : substr($value, 0, $max);
+}
+
+function str_lower(string $value): string
+{
+    return function_exists('mb_strtolower') ? mb_strtolower($value, 'UTF-8') : strtolower($value);
+}
+
+function clean_text($value, int $max): string
 {
     $value = is_string($value) ? trim(preg_replace('/\s+/u', ' ', $value) ?? '') : '';
-    return mb_substr($value, 0, $max);
+    return str_cut($value, $max);
 }
 
 function current_user(): string
@@ -34,6 +69,21 @@ function current_user(): string
         fail('Bitte zuerst einen Namen angeben.', 401);
     }
     return $user;
+}
+
+function parse_deadline($value): int
+{
+    if (!is_numeric($value)) {
+        fail('Bitte eine Deadline angeben.');
+    }
+    $deadline = (int)$value;
+    if ($deadline <= time()) {
+        fail('Die Deadline muss in der Zukunft liegen.');
+    }
+    if ($deadline > time() + MAX_DEADLINE_DAYS * 86400) {
+        fail('Die Deadline darf höchstens ein Jahr in der Zukunft liegen.');
+    }
+    return $deadline;
 }
 
 function find_list(int $id): array
@@ -47,11 +97,38 @@ function find_list(int $id): array
     return $list;
 }
 
+function find_item_list(int $itemId): array
+{
+    $stmt = db()->prepare('SELECT list_id, done FROM items WHERE id = ?');
+    $stmt->execute([$itemId]);
+    $row = $stmt->fetch();
+    if (!$row) {
+        fail('Item nicht gefunden.', 404);
+    }
+    return [find_list((int)$row['list_id']), (bool)$row['done']];
+}
+
 function require_owner(array $list, string $user): void
 {
-    if (mb_strtolower($list['created_by']) !== mb_strtolower($user)) {
+    if (str_lower($list['created_by']) !== str_lower($user)) {
         fail('Nur der Ersteller der Liste darf das.', 403);
     }
+}
+
+function require_not_archived(array $list): void
+{
+    if ((int)$list['archived'] === 1) {
+        fail('Die Liste ist archiviert und kann nicht mehr verändert werden.');
+    }
+}
+
+/** draft | open | expired | closed – "expired" = offen, aber Deadline erreicht. */
+function list_phase(array $list): string
+{
+    if ($list['status'] === 'open' && $list['deadline'] !== null && (int)$list['deadline'] <= time()) {
+        return 'expired';
+    }
+    return $list['status'];
 }
 
 /** Main schlägt Twink, danach höchster Wert. Gibt Gewinner-Namen (mehrere bei Gleichstand) zurück. */
@@ -60,17 +137,27 @@ function winners(array $rolls): array
     if (!$rolls) {
         return [];
     }
-    $pool = array_filter($rolls, fn($r) => $r['kind'] === 'main') ?: $rolls;
+    $pool = array_filter($rolls, function ($r) { return $r['kind'] === 'main'; }) ?: $rolls;
     $best = max(array_column($pool, 'value'));
     return array_values(array_map(
-        fn($r) => $r['username'],
-        array_filter($pool, fn($r) => $r['value'] === $best)
+        function ($r) { return $r['username']; },
+        array_filter($pool, function ($r) use ($best) { return $r['value'] === $best; })
     ));
+}
+
+function normalize_list(array $list): array
+{
+    $list['id'] = (int)$list['id'];
+    $list['created_at'] = (int)$list['created_at'];
+    $list['deadline'] = $list['deadline'] === null ? null : (int)$list['deadline'];
+    $list['archived'] = (int)$list['archived'] === 1;
+    $list['phase'] = list_phase($list);
+    return $list;
 }
 
 function list_detail(int $id): array
 {
-    $list = find_list($id);
+    $list = normalize_list(find_list($id));
 
     $stmt = db()->prepare('SELECT * FROM items WHERE list_id = ? ORDER BY id');
     $stmt->execute([$id]);
@@ -92,14 +179,39 @@ function list_detail(int $id): array
     foreach ($items as &$item) {
         $item['id'] = (int)$item['id'];
         $item['quality'] = $item['quality'] === null ? null : (int)$item['quality'];
+        $item['done'] = (int)$item['done'] === 1;
         $item['rolls'] = $byItem[$item['id']] ?? [];
         $item['winners'] = winners($item['rolls']);
     }
     unset($item);
 
-    $list['id'] = (int)$list['id'];
     $list['items'] = $items;
+    $list['server_time'] = time();
     return $list;
+}
+
+function health(): array
+{
+    $checks = [
+        'php_version' => PHP_VERSION,
+        'php_ok' => version_compare(PHP_VERSION, '7.4.0', '>='),
+        'pdo_sqlite' => extension_loaded('pdo_sqlite'),
+        'mbstring' => extension_loaded('mbstring'),
+        'data_dir_writable' => is_dir(DATA_DIR) && is_writable(DATA_DIR),
+        'db_write' => false,
+    ];
+    try {
+        $pdo = db();
+        $pdo->beginTransaction();
+        $pdo->exec('CREATE TABLE IF NOT EXISTS _health (t INTEGER)');
+        $pdo->exec('INSERT INTO _health VALUES (1)');
+        $pdo->rollBack();
+        $checks['db_write'] = true;
+    } catch (Throwable $e) {
+        $checks['db_error'] = $e->getMessage();
+    }
+    $checks['ok'] = $checks['php_ok'] && $checks['pdo_sqlite'] && $checks['db_write'];
+    return $checks;
 }
 
 $action = $_GET['action'] ?? '';
@@ -107,21 +219,27 @@ $method = $_SERVER['REQUEST_METHOD'];
 
 if ($method === 'GET') {
     switch ($action) {
+        case 'health':
+            respond(health());
+
         case 'components':
             respond(['components' => COMPONENT_TYPES]);
 
         case 'lists':
             $rows = db()->query(
-                'SELECT l.id, l.title, l.created_by, l.status, l.created_at,
-                        (SELECT COUNT(*) FROM items i WHERE i.list_id = l.id) AS item_count
+                'SELECT l.*,
+                        (SELECT COUNT(*) FROM items i WHERE i.list_id = l.id) AS item_count,
+                        (SELECT COUNT(*) FROM items i WHERE i.list_id = l.id AND i.done = 1) AS done_count
                  FROM lists l
                  ORDER BY CASE l.status WHEN \'open\' THEN 0 WHEN \'draft\' THEN 1 ELSE 2 END, l.created_at DESC'
             )->fetchAll();
             foreach ($rows as &$row) {
-                $row['id'] = (int)$row['id'];
+                $row = normalize_list($row);
                 $row['item_count'] = (int)$row['item_count'];
+                $row['done_count'] = (int)$row['done_count'];
             }
-            respond(['lists' => $rows]);
+            unset($row);
+            respond(['lists' => $rows, 'server_time' => time()]);
 
         case 'list':
             respond(['list' => list_detail((int)($_GET['id'] ?? 0))]);
@@ -134,7 +252,7 @@ if ($method !== 'POST') {
 }
 
 // Nur JSON-Requests akzeptieren (schützt vor einfachen Cross-Site-Formularen).
-if (!str_starts_with($_SERVER['CONTENT_TYPE'] ?? '', 'application/json')) {
+if (stripos($_SERVER['CONTENT_TYPE'] ?? '', 'application/json') === false) {
     fail('JSON erwartet.', 415);
 }
 $input = json_decode(file_get_contents('php://input') ?: '', true);
@@ -152,8 +270,9 @@ switch ($action) {
         if ($title === '') {
             fail('Bitte einen Titel angeben.');
         }
-        $pdo->prepare('INSERT INTO lists (title, created_by, status, created_at) VALUES (?, ?, \'draft\', ?)')
-            ->execute([$title, $user, $now]);
+        $deadline = parse_deadline($input['deadline'] ?? null);
+        $pdo->prepare('INSERT INTO lists (title, created_by, status, created_at, deadline) VALUES (?, ?, \'draft\', ?, ?)')
+            ->execute([$title, $user, $now, $deadline]);
         respond(['id' => (int)$pdo->lastInsertId()]);
 
     case 'delete_list':
@@ -162,9 +281,28 @@ switch ($action) {
         $pdo->prepare('DELETE FROM lists WHERE id = ?')->execute([$list['id']]);
         respond(['ok' => true]);
 
+    case 'archive':
+        $list = find_list((int)($input['list_id'] ?? 0));
+        require_owner($list, $user);
+        $pdo->prepare('UPDATE lists SET archived = ? WHERE id = ?')
+            ->execute([empty($input['archived']) ? 0 : 1, $list['id']]);
+        respond(['list' => list_detail((int)$list['id'])]);
+
+    case 'set_deadline':
+        $list = find_list((int)($input['list_id'] ?? 0));
+        require_owner($list, $user);
+        require_not_archived($list);
+        if ($list['status'] === 'closed') {
+            fail('Die Verteilung ist bereits abgeschlossen.');
+        }
+        $pdo->prepare('UPDATE lists SET deadline = ? WHERE id = ?')
+            ->execute([parse_deadline($input['deadline'] ?? null), $list['id']]);
+        respond(['list' => list_detail((int)$list['id'])]);
+
     case 'add_item':
         $list = find_list((int)($input['list_id'] ?? 0));
         require_owner($list, $user);
+        require_not_archived($list);
         if ($list['status'] !== 'draft') {
             fail('Die Liste ist bereits freigegeben.');
         }
@@ -199,25 +337,35 @@ switch ($action) {
         respond(['list' => list_detail((int)$list['id'])]);
 
     case 'delete_item':
-        $stmt = $pdo->prepare('SELECT list_id FROM items WHERE id = ?');
-        $stmt->execute([(int)($input['item_id'] ?? 0)]);
-        $listId = $stmt->fetchColumn();
-        if ($listId === false) {
-            fail('Item nicht gefunden.', 404);
-        }
-        $list = find_list((int)$listId);
+        [$list] = find_item_list((int)($input['item_id'] ?? 0));
         require_owner($list, $user);
+        require_not_archived($list);
         if ($list['status'] !== 'draft') {
             fail('Die Liste ist bereits freigegeben.');
         }
         $pdo->prepare('DELETE FROM items WHERE id = ?')->execute([(int)$input['item_id']]);
         respond(['list' => list_detail((int)$list['id'])]);
 
+    case 'toggle_done':
+        [$list, $done] = find_item_list((int)($input['item_id'] ?? 0));
+        require_owner($list, $user);
+        require_not_archived($list);
+        if ($list['status'] === 'draft') {
+            fail('Items können erst nach der Freigabe als erledigt markiert werden.');
+        }
+        $pdo->prepare('UPDATE items SET done = ? WHERE id = ?')
+            ->execute([$done ? 0 : 1, (int)$input['item_id']]);
+        respond(['list' => list_detail((int)$list['id'])]);
+
     case 'publish':
         $list = find_list((int)($input['list_id'] ?? 0));
         require_owner($list, $user);
+        require_not_archived($list);
         if ($list['status'] !== 'draft') {
             fail('Die Liste ist bereits freigegeben.');
+        }
+        if ($list['deadline'] === null || (int)$list['deadline'] <= $now) {
+            fail('Bitte zuerst eine Deadline in der Zukunft setzen.');
         }
         $count = $pdo->prepare('SELECT COUNT(*) FROM items WHERE list_id = ?');
         $count->execute([$list['id']]);
@@ -230,6 +378,7 @@ switch ($action) {
     case 'close':
         $list = find_list((int)($input['list_id'] ?? 0));
         require_owner($list, $user);
+        require_not_archived($list);
         if ($list['status'] !== 'open') {
             fail('Nur offene Listen können abgeschlossen werden.');
         }
@@ -238,24 +387,26 @@ switch ($action) {
 
     case 'roll':
         $kind = $input['kind'] ?? '';
-        if (!isset(ROLL_MAX[$kind])) {
+        if (!is_string($kind) || !isset(ROLL_MAX[$kind])) {
             fail('Ungültige Wurfart.');
         }
-        $stmt = $pdo->prepare('SELECT list_id FROM items WHERE id = ?');
-        $stmt->execute([(int)($input['item_id'] ?? 0)]);
-        $listId = $stmt->fetchColumn();
-        if ($listId === false) {
-            fail('Item nicht gefunden.', 404);
+        [$list, $done] = find_item_list((int)($input['item_id'] ?? 0));
+        require_not_archived($list);
+        $phase = list_phase($list);
+        if ($phase === 'expired') {
+            fail('Die Deadline ist abgelaufen – es kann nicht mehr gewürfelt werden.');
         }
-        $list = find_list((int)$listId);
-        if ($list['status'] !== 'open') {
+        if ($phase !== 'open') {
             fail('Auf diese Liste kann nicht (mehr) gewürfelt werden.');
+        }
+        if ($done) {
+            fail('Dieses Item ist bereits erledigt.');
         }
         try {
             $pdo->prepare('INSERT INTO rolls (item_id, username, kind, value, created_at) VALUES (?, ?, ?, ?, ?)')
                 ->execute([(int)$input['item_id'], $user, $kind, random_int(0, ROLL_MAX[$kind]), $now]);
         } catch (PDOException $e) {
-            if (str_contains($e->getMessage(), 'UNIQUE')) {
+            if (strpos($e->getMessage(), 'UNIQUE') !== false) {
                 fail('Du hast auf dieses Item bereits gewürfelt.', 409);
             }
             throw $e;

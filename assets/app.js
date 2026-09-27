@@ -4,8 +4,11 @@
   const COOKIE = 'loot_user';
   const COOKIE_DAYS = 5;
   const POLL_MS = 5000;
-  const STATUS_LABEL = { draft: 'Entwurf', open: 'Offen', closed: 'Abgeschlossen' };
+  const DEFAULT_DEADLINE_HOURS = 24;
+  const PHASE_LABEL = { draft: 'Entwurf', open: 'Offen', expired: 'Beendet', closed: 'Abgeschlossen' };
   const TYPE_LABEL = { ore: 'Erz', component: 'Komponente' };
+  // API relativ zum Skript auflösen – funktioniert auch, wenn die Seite ohne "/" am Ende aufgerufen wird.
+  const API_URL = new URL('../api.php', document.currentScript.src).href;
 
   const app = document.getElementById('app');
   const toastEl = document.getElementById('toast');
@@ -14,6 +17,7 @@
 
   let components = {};
   let pollTimer = null;
+  let clockSkew = 0; // Serverzeit - Browserzeit (Sekunden)
 
   // ---------- Helpers ----------
 
@@ -52,30 +56,97 @@
     toastEl.classList.toggle('error', isError);
     toastEl.classList.add('show');
     clearTimeout(toast.timer);
-    toast.timer = setTimeout(() => toastEl.classList.remove('show'), 3200);
+    toast.timer = setTimeout(() => toastEl.classList.remove('show'), isError ? 6000 : 3200);
   }
 
   async function api(action, { params = {}, body = null } = {}) {
-    const query = new URLSearchParams({ action, ...params });
+    const url = new URL(API_URL);
+    url.search = new URLSearchParams({ action, ...params });
     const opts = body
       ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
       : {};
-    const res = await fetch('api.php?' + query, { credentials: 'same-origin', ...opts });
-    const data = await res.json().catch(() => ({ error: 'Serverfehler.' }));
+    const res = await fetch(url, { credentials: 'same-origin', ...opts });
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      const snippet = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150);
+      throw new Error(`Serverfehler (HTTP ${res.status})${snippet ? ': ' + snippet : ''}`);
+    }
     if (!res.ok || data.error) {
       if (res.status === 401) askName();
-      throw new Error(data.error || 'Unbekannter Fehler.');
+      throw new Error(data.error || `Unbekannter Fehler (HTTP ${res.status}).`);
     }
+    if (typeof data.server_time === 'number') clockSkew = data.server_time - Date.now() / 1000;
     return data;
   }
+
+  const now = () => Date.now() / 1000 + clockSkew;
 
   function formatDate(ts) {
     return new Date(ts * 1000).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
   }
 
+  function formatRemaining(seconds) {
+    if (seconds <= 0) return 'abgelaufen';
+    const d = Math.floor(seconds / 86400);
+    const hrs = Math.floor((seconds % 86400) / 3600);
+    const min = Math.floor((seconds % 3600) / 60);
+    const sec = Math.floor(seconds % 60);
+    if (d > 0) return `noch ${d} T ${hrs} Std`;
+    if (hrs > 0) return `noch ${hrs} Std ${min} Min`;
+    if (min > 0) return `noch ${min} Min ${sec} s`;
+    return `noch ${sec} s`;
+  }
+
+  /** "2026-09-28T20:00" für <input type="datetime-local"> in lokaler Zeit. */
+  function toLocalInput(ts) {
+    const d = new Date(ts * 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function fromLocalInput(value) {
+    const ms = new Date(value).getTime();
+    return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
+  }
+
+  function deadlineInput(ts) {
+    return h('input', {
+      type: 'datetime-local',
+      required: true,
+      min: toLocalInput(now()),
+      value: toLocalInput(ts),
+    });
+  }
+
+  /** Deadline-Anzeige mit Live-Countdown (wird vom Ticker unten aktualisiert). */
+  function deadlineInfo(list) {
+    if (!list.deadline) return h('span', { class: 'deadline muted' }, '⏱ keine Deadline');
+    const relevant = list.phase === 'open' || list.phase === 'draft';
+    return h('span', { class: `deadline${list.phase === 'expired' ? ' expired' : ''}` },
+      `⏱ Deadline ${formatDate(list.deadline)}`,
+      relevant ? h('span', { class: 'countdown', 'data-deadline': list.deadline }, ` · ${formatRemaining(list.deadline - now())}`) : null,
+    );
+  }
+
+  setInterval(() => {
+    for (const el of document.querySelectorAll('.countdown[data-deadline]')) {
+      const remaining = Number(el.dataset.deadline) - now();
+      el.textContent = ` · ${formatRemaining(remaining)}`;
+      el.classList.toggle('soon', remaining > 0 && remaining < 3600);
+    }
+  }, 1000);
+
   function stopPolling() {
     clearInterval(pollTimer);
     pollTimer = null;
+  }
+
+  function isEditing() {
+    const el = document.activeElement;
+    return el && app.contains(el) && (el.tagName === 'INPUT' || el.tagName === 'SELECT');
   }
 
   // ---------- Username ----------
@@ -107,49 +178,65 @@
 
   // ---------- Overview ----------
 
+  function listCard(l) {
+    const doneInfo = l.item_count && l.phase !== 'draft' ? ` · ${l.done_count}/${l.item_count} erledigt` : '';
+    return h('a', { class: `card list-card phase-${l.phase}${l.archived ? ' archived' : ''}`, href: `#/list/${l.id}` },
+      h('div', { class: 'card-head' },
+        h('h3', {}, l.title),
+        h('span', { class: `badge badge-${l.archived ? 'archived' : l.phase}` }, l.archived ? 'Archiviert' : PHASE_LABEL[l.phase]),
+      ),
+      h('p', { class: 'muted small' }, `${l.item_count} Item${l.item_count === 1 ? '' : 's'}${doneInfo} · von ${l.created_by}`),
+      h('p', { class: 'small' }, deadlineInfo(l)),
+    );
+  }
+
   async function renderOverview() {
     stopPolling();
     const titleInput = h('input', { type: 'text', maxlength: 80, required: true, placeholder: 'z. B. Mining-Run Aaron Halo 27.09.' });
+    const deadlineEl = deadlineInput(now() + DEFAULT_DEADLINE_HOURS * 3600);
     const createForm = h('form', {
       class: 'inline-form',
       onsubmit: async (e) => {
         e.preventDefault();
+        const deadline = fromLocalInput(deadlineEl.value);
+        if (!deadline) { toast('Bitte eine Deadline angeben.', true); return; }
         try {
-          const { id } = await api('create_list', { body: { title: titleInput.value } });
+          const { id } = await api('create_list', { body: { title: titleInput.value, deadline } });
           location.hash = `#/list/${id}`;
         } catch (err) { toast(err.message, true); }
       },
     },
-      h('label', { class: 'field grow' }, h('span', {}, 'Titel der Lootliste'), titleInput),
+      h('label', { class: 'field grow' }, h('span', {}, 'Titel der Lootliste *'), titleInput),
+      h('label', { class: 'field' }, h('span', {}, 'Deadline *'), deadlineEl),
       h('button', { class: 'btn btn-primary', type: 'submit' }, '+ Neue Lootliste'),
     );
 
     const listWrap = h('div', { class: 'list-grid' }, h('p', { class: 'muted' }, 'Lade …'));
+    const archiveWrap = h('div');
 
     app.replaceChildren(
       h('section', { class: 'hero' },
         h('h1', {}, 'Loot', h('span', { class: 'accent' }, 'roll')),
-        h('p', { class: 'muted' }, 'Lootliste anlegen, freigeben – und jeder würfelt einmal pro Item. Main 0–100, Twink 0–50. Main schlägt Twink.'),
+        h('p', { class: 'muted' }, 'Lootliste anlegen, freigeben – und jeder würfelt bis zur Deadline einmal pro Item. Main 0–100, Twink 0–50. Main schlägt Twink.'),
       ),
       h('section', { class: 'panel' }, h('h2', { class: 'panel-title' }, 'Neue Lootliste'), createForm),
       h('section', {}, h('h2', { class: 'section-title' }, 'Lootlisten'), listWrap),
+      archiveWrap,
     );
 
     try {
       const { lists } = await api('lists');
-      if (!lists.length) {
-        listWrap.replaceChildren(h('p', { class: 'muted empty' }, 'Noch keine Lootlisten vorhanden.'));
-        return;
+      const active = lists.filter((l) => !l.archived);
+      const archived = lists.filter((l) => l.archived);
+      listWrap.replaceChildren(...(active.length
+        ? active.map(listCard)
+        : [h('p', { class: 'muted empty' }, 'Keine aktiven Lootlisten vorhanden.')]));
+      if (archived.length) {
+        archiveWrap.replaceChildren(h('details', { class: 'archive' },
+          h('summary', { class: 'section-title' }, `Archiv (${archived.length})`),
+          h('div', { class: 'list-grid' }, archived.map(listCard)),
+        ));
       }
-      listWrap.replaceChildren(...lists.map((l) =>
-        h('a', { class: `card list-card status-${l.status}`, href: `#/list/${l.id}` },
-          h('div', { class: 'card-head' },
-            h('h3', {}, l.title),
-            h('span', { class: `badge badge-${l.status}` }, STATUS_LABEL[l.status]),
-          ),
-          h('p', { class: 'muted small' }, `${l.item_count} Item${l.item_count === 1 ? '' : 's'} · von ${l.created_by} · ${formatDate(l.created_at)}`),
-        ),
-      ));
     } catch (err) {
       listWrap.replaceChildren(h('p', { class: 'error-text' }, err.message));
     }
@@ -213,40 +300,71 @@
     );
   }
 
+  function buildDeadlineForm(list, rerender) {
+    const input = deadlineInput(list.deadline && list.deadline > now() ? list.deadline : now() + DEFAULT_DEADLINE_HOURS * 3600);
+    return h('form', {
+      class: 'deadline-form',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        const deadline = fromLocalInput(input.value);
+        if (!deadline) { toast('Bitte eine Deadline angeben.', true); return; }
+        try {
+          rerender((await api('set_deadline', { body: { list_id: list.id, deadline } })).list);
+          toast('Deadline gespeichert.');
+        } catch (err) { toast(err.message, true); }
+      },
+    },
+      h('label', { class: 'field' }, h('span', {}, list.phase === 'expired' ? 'Deadline verlängern' : 'Deadline ändern'), input),
+      h('button', { class: 'btn btn-ghost btn-sm', type: 'submit' }, 'Speichern'),
+    );
+  }
+
   function buildItemCard(list, item, user, rerender) {
     const isOwner = sameUser(list.created_by, user);
     const myRoll = item.rolls.find((r) => sameUser(r.username, user));
     const winners = item.winners.map((w) => w.toLocaleLowerCase());
     const tie = item.winners.length > 1;
+    const canRoll = list.phase === 'open' && !list.archived && !item.done;
 
-    const roll = async (kind) => {
+    const post = async (action, body) => {
       try {
-        const { list: updated } = await api('roll', { body: { item_id: item.id, kind } });
+        const { list: updated } = await api(action, { body });
         rerender(updated);
-        const mine = updated.items.find((i) => i.id === item.id).rolls.find((r) => sameUser(r.username, user));
-        if (mine) toast(`${item.name}: ${mine.kind === 'main' ? 'Main' : 'Twink'}-Wurf ${mine.value}`);
-      } catch (err) { toast(err.message, true); }
+        return updated;
+      } catch (err) {
+        toast(err.message, true);
+        return null;
+      }
     };
 
-    let actions = null;
-    if (list.status === 'draft' && isOwner) {
-      actions = h('button', {
+    const roll = async (kind) => {
+      const updated = await post('roll', { item_id: item.id, kind });
+      const mine = updated && updated.items.find((i) => i.id === item.id).rolls.find((r) => sameUser(r.username, user));
+      if (mine) toast(`${item.name}: ${mine.kind === 'main' ? 'Main' : 'Twink'}-Wurf ${mine.value}`);
+    };
+
+    const actions = [];
+    if (list.phase === 'draft' && isOwner && !list.archived) {
+      actions.push(h('button', {
         class: 'btn btn-ghost btn-sm danger',
         type: 'button',
-        onclick: async () => {
-          try {
-            const { list: updated } = await api('delete_item', { body: { item_id: item.id } });
-            rerender(updated);
-          } catch (err) { toast(err.message, true); }
-        },
-      }, 'Entfernen');
-    } else if (list.status === 'open' && !myRoll) {
-      actions = h('div', { class: 'roll-buttons' },
+        onclick: () => post('delete_item', { item_id: item.id }),
+      }, 'Entfernen'));
+    }
+    if (canRoll && !myRoll) {
+      actions.push(h('div', { class: 'roll-buttons' },
         h('button', { class: 'btn btn-primary btn-sm', type: 'button', onclick: () => roll('main') }, '🎲 Main (0–100)'),
         h('button', { class: 'btn btn-secondary btn-sm', type: 'button', onclick: () => roll('twink') }, '🎲 Twink (0–50)'),
-      );
+      ));
     } else if (myRoll) {
-      actions = h('span', { class: 'my-roll' }, `Dein Wurf: ${myRoll.value} (${myRoll.kind === 'main' ? 'Main' : 'Twink'})`);
+      actions.push(h('span', { class: 'my-roll' }, `Dein Wurf: ${myRoll.value} (${myRoll.kind === 'main' ? 'Main' : 'Twink'})`));
+    }
+    if (isOwner && list.phase !== 'draft' && !list.archived) {
+      actions.push(h('button', {
+        class: `btn btn-sm ${item.done ? 'btn-ghost' : 'btn-success'}`,
+        type: 'button',
+        onclick: () => post('toggle_done', { item_id: item.id }),
+      }, item.done ? '↺ Rückgängig' : '✔ Erledigt'));
     }
 
     const rollRows = item.rolls.map((r) => {
@@ -259,19 +377,21 @@
     });
 
     let resultLine = null;
-    if (list.status !== 'draft') {
-      if (!item.rolls.length) resultLine = h('p', { class: 'muted small' }, 'Noch keine Würfe.');
+    if (list.phase !== 'draft') {
+      const final = list.phase !== 'open' || item.done;
+      if (!item.rolls.length) resultLine = h('p', { class: 'muted small' }, 'Keine Würfe.');
       else if (tie) resultLine = h('p', { class: 'tie' }, `⚠ Gleichstand: ${item.winners.join(', ')}`);
-      else resultLine = h('p', { class: 'winner-line' }, list.status === 'closed' ? 'Gewinner: ' : 'Führt: ', h('strong', {}, item.winners[0]));
+      else resultLine = h('p', { class: 'winner-line' }, final ? 'Gewinner: ' : 'Führt: ', h('strong', {}, item.winners[0]));
     }
 
-    return h('article', { class: 'card item-card' },
+    return h('article', { class: `card item-card${item.done ? ' done' : ''}` },
+      item.done ? h('span', { class: 'done-check', title: 'Erledigt', 'aria-label': 'Erledigt' }, '✔') : null,
       h('div', { class: 'card-head' },
-        h('div', {},
+        h('div', { class: 'item-title' },
           h('h3', {}, item.name),
           h('div', { class: 'tags' }, itemMeta(item)),
         ),
-        actions,
+        actions.length ? h('div', { class: 'item-actions' }, actions) : null,
       ),
       resultLine,
       rollRows.length ? h('ol', { class: 'rolls' }, rollRows) : null,
@@ -285,35 +405,44 @@
 
     let lastJson = '';
     let formEl = null;
+    const snapshot = (list) => JSON.stringify({ ...list, server_time: 0 });
 
     const rerender = (list, resetForm = false) => {
-      lastJson = JSON.stringify(list);
+      lastJson = snapshot(list);
       const isOwner = sameUser(list.created_by, user);
+      const editable = isOwner && !list.archived;
 
-      if (list.status === 'draft' && isOwner && (!formEl || resetForm)) formEl = buildItemForm(list, rerender);
+      if (list.phase === 'draft' && editable && (!formEl || resetForm)) formEl = buildItemForm(list, rerender);
+
+      const call = (action, extra = {}, message = null) => async () => {
+        try {
+          rerender((await api(action, { body: { list_id: list.id, ...extra } })).list);
+          if (message) toast(message);
+        } catch (err) { toast(err.message, true); }
+      };
 
       const ownerActions = [];
-      if (isOwner && list.status === 'draft') {
+      if (editable && list.phase === 'draft') {
         ownerActions.push(h('button', {
           class: 'btn btn-primary',
           type: 'button',
-          onclick: async () => {
-            if (!confirm('Liste speichern und zum Würfeln freigeben? Danach sind keine Änderungen an den Items mehr möglich.')) return;
-            try { rerender((await api('publish', { body: { list_id: list.id } })).list); toast('Liste freigegeben – es darf gewürfelt werden!'); } catch (err) { toast(err.message, true); }
-          },
+          onclick: () => confirm('Liste speichern und zum Würfeln freigeben? Danach sind keine Änderungen an den Items mehr möglich.')
+            && call('publish', {}, 'Liste freigegeben – es darf gewürfelt werden!')(),
         }, '✔ Speichern & freigeben'));
       }
-      if (isOwner && list.status === 'open') {
+      if (editable && (list.phase === 'open' || list.phase === 'expired')) {
         ownerActions.push(h('button', {
           class: 'btn btn-secondary',
           type: 'button',
-          onclick: async () => {
-            if (!confirm('Verteilung abschließen? Danach sind keine Würfe mehr möglich.')) return;
-            try { rerender((await api('close', { body: { list_id: list.id } })).list); } catch (err) { toast(err.message, true); }
-          },
+          onclick: () => confirm('Verteilung endgültig abschließen? Danach sind keine Würfe mehr möglich.') && call('close')(),
         }, '🏁 Verteilung abschließen'));
       }
       if (isOwner) {
+        ownerActions.push(h('button', {
+          class: 'btn btn-ghost',
+          type: 'button',
+          onclick: call('archive', { archived: !list.archived }, list.archived ? 'Liste wiederhergestellt.' : 'Liste archiviert.'),
+        }, list.archived ? '↺ Wiederherstellen' : '🗄 Archivieren'));
         ownerActions.push(h('button', {
           class: 'btn btn-ghost danger',
           type: 'button',
@@ -325,24 +454,34 @@
       }
 
       let hint = null;
-      if (list.status === 'draft' && !isOwner) hint = 'Diese Liste wird noch vom Ersteller bearbeitet. Würfeln ist nach der Freigabe möglich.';
-      if (list.status === 'draft' && isOwner) hint = 'Füge Items hinzu und gib die Liste frei, sobald sie vollständig ist.';
-      if (list.status === 'open') hint = 'Du kannst auf jedes Item genau einmal würfeln – Main (0–100) oder Twink (0–50). Main-Würfe haben Vorrang.';
+      if (list.archived) hint = 'Diese Liste ist archiviert und schreibgeschützt.';
+      else if (list.phase === 'draft' && !isOwner) hint = 'Diese Liste wird noch vom Ersteller bearbeitet. Würfeln ist nach der Freigabe möglich.';
+      else if (list.phase === 'draft') hint = 'Füge Items hinzu und gib die Liste frei, sobald sie vollständig ist.';
+      else if (list.phase === 'open') hint = 'Du kannst bis zur Deadline auf jedes Item genau einmal würfeln – Main (0–100) oder Twink (0–50). Main-Würfe haben Vorrang.';
+      else if (list.phase === 'expired') hint = 'Die Deadline ist abgelaufen – es kann nicht mehr gewürfelt werden.';
+
+      const doneCount = list.items.filter((i) => i.done).length;
 
       app.replaceChildren(...[
         h('a', { class: 'back-link', href: '#/' }, '← Alle Lootlisten'),
+        list.archived ? h('div', { class: 'archived-banner' }, '🗄 Archiviert') : null,
         h('section', { class: 'panel list-header' },
-          h('div', {},
+          h('div', { class: 'list-header-main' },
             h('div', { class: 'card-head' },
               h('h1', { class: 'list-title' }, list.title),
-              h('span', { class: `badge badge-${list.status}` }, STATUS_LABEL[list.status]),
+              h('span', { class: `badge badge-${list.phase}` }, PHASE_LABEL[list.phase]),
             ),
-            h('p', { class: 'muted small' }, `Erstellt von ${list.created_by} · ${formatDate(list.created_at)} · ${list.items.length} Items`),
+            h('p', { class: 'muted small' },
+              `Erstellt von ${list.created_by} · ${formatDate(list.created_at)} · ${list.items.length} Items`,
+              list.phase !== 'draft' ? ` · ${doneCount} erledigt` : null),
+            h('p', { class: 'small' }, deadlineInfo(list)),
             hint && h('p', { class: 'hint' }, hint),
+            editable && (list.phase === 'draft' || list.phase === 'open' || list.phase === 'expired')
+              ? buildDeadlineForm(list, rerender) : null,
           ),
           ownerActions.length ? h('div', { class: 'actions' }, ownerActions) : null,
         ),
-        formEl && list.status === 'draft' && isOwner
+        formEl && list.phase === 'draft' && editable
           ? h('section', { class: 'panel' }, h('h2', { class: 'panel-title' }, 'Item hinzufügen'), formEl)
           : null,
         h('section', { class: 'items' },
@@ -351,7 +490,7 @@
             : h('p', { class: 'muted empty' }, 'Noch keine Items in dieser Liste.'),
         ),
       ].filter(Boolean));
-      if (resetForm) formEl.querySelector('input').focus();
+      if (resetForm && formEl) formEl.querySelector('input').focus();
     };
 
     try {
@@ -361,12 +500,12 @@
       return;
     }
 
-    // Live-Aktualisierung (nicht während der Ersteller Items einträgt).
+    // Live-Aktualisierung (pausiert, solange jemand etwas eingibt).
     pollTimer = setInterval(async () => {
-      if (document.hidden || (formEl && formEl.contains(document.activeElement))) return;
+      if (document.hidden || isEditing()) return;
       try {
         const { list } = await api('list', { params: { id } });
-        if (JSON.stringify(list) !== lastJson) rerender(list);
+        if (snapshot(list) !== lastJson) rerender(list);
       } catch { /* ignorieren, nächster Versuch folgt */ }
     }, POLL_MS);
   }
