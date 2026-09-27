@@ -53,8 +53,8 @@ function db(): PDO
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             item_id     INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
             username    TEXT    NOT NULL COLLATE NOCASE,
-            kind        TEXT    NOT NULL CHECK (kind IN ('main','twink')),
-            value       INTEGER NOT NULL,
+            kind        TEXT    NOT NULL CHECK (kind IN ('main','twink','pass')),
+            value       INTEGER NULL,
             created_at  INTEGER NOT NULL,
             UNIQUE (item_id, username)
         );
@@ -66,6 +66,8 @@ function db(): PDO
     add_column($pdo, 'lists', 'deadline', 'INTEGER NULL');
     add_column($pdo, 'lists', 'archived', 'INTEGER NOT NULL DEFAULT 0');
     add_column($pdo, 'items', 'done', 'INTEGER NOT NULL DEFAULT 0');
+    add_column($pdo, 'items', 'component_class', 'TEXT NULL');
+    migrate_rolls_pass($pdo);
 
     return $pdo;
 }
@@ -75,5 +77,37 @@ function add_column(PDO $pdo, string $table, string $column, string $definition)
     $columns = array_column($pdo->query("PRAGMA table_info($table)")->fetchAll(), 'name');
     if (!in_array($column, $columns, true)) {
         $pdo->exec("ALTER TABLE $table ADD COLUMN $column $definition");
+    }
+}
+
+/** Alte rolls-Tabelle kennt "Kein Interesse" (kind = pass, ohne Wert) noch nicht – Tabelle neu aufbauen. */
+function migrate_rolls_pass(PDO $pdo): void
+{
+    $sql = (string)$pdo->query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rolls'")->fetchColumn();
+    if ($sql === '' || strpos($sql, "'pass'") !== false) {
+        return;
+    }
+    $pdo->beginTransaction();
+    try {
+        $pdo->exec("
+            CREATE TABLE rolls_new (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id     INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                username    TEXT    NOT NULL COLLATE NOCASE,
+                kind        TEXT    NOT NULL CHECK (kind IN ('main','twink','pass')),
+                value       INTEGER NULL,
+                created_at  INTEGER NOT NULL,
+                UNIQUE (item_id, username)
+            );
+            INSERT INTO rolls_new (id, item_id, username, kind, value, created_at)
+                SELECT id, item_id, username, kind, value, created_at FROM rolls;
+            DROP TABLE rolls;
+            ALTER TABLE rolls_new RENAME TO rolls;
+            CREATE INDEX IF NOT EXISTS idx_rolls_item ON rolls(item_id);
+        ");
+        $pdo->commit();
+    } catch (Throwable $e) {
+        $pdo->rollBack();
+        throw $e;
     }
 }

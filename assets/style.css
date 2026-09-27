@@ -214,6 +214,7 @@ h1, h2, h3 {
 }
 .tag-ore { color: var(--gold); border-color: rgba(244, 178, 56, 0.4); }
 .tag-component { color: var(--twink); border-color: rgba(95, 180, 255, 0.4); }
+.tag-class { color: var(--text); border-color: rgba(255, 255, 255, 0.25); }
 
 /* ===== Forms ===== */
 .inline-form, .item-form { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
@@ -221,6 +222,7 @@ h1, h2, h3 {
 .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .field[hidden] { display: none; }
 .field.grow { flex: 1 1 260px; }
+.item-form .field-narrow { flex: 0 1 120px; }
 .field > span { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.15em; color: var(--muted); }
 
 input, select {
@@ -271,6 +273,8 @@ select option, select optgroup { background: var(--panel-solid); color: var(--te
 .items { display: flex; flex-direction: column; gap: 12px; }
 .roll-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
 .my-roll { font-weight: 600; color: var(--gold); white-space: nowrap; }
+.my-roll.my-pass { color: var(--muted); }
+.passes { margin: 8px 0 0; }
 
 .winner-line, .tie { margin: 12px 0 0; }
 .winner-line strong { color: var(--gold); font-family: var(--font-head); font-size: 0.95rem; }

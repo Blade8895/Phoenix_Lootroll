@@ -43,6 +43,9 @@ const COMPONENT_TYPES = [
     ],
 ];
 
+// Klassen (Güte) der Komponenten, A = beste.
+const COMPONENT_CLASSES = ['A', 'B', 'C', 'D'];
+
 function component_type_valid(string $type): bool
 {
     foreach (COMPONENT_TYPES as $group) {

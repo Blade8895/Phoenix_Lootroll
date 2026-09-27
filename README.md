@@ -3,10 +3,10 @@
 Einfache Loot-Verteilung im Stil des alten WoW-Need-Rolls – für Star-Citizen-Loot (Erze & Schiffskomponenten).
 
 - Kein Login: Username frei wählbar, wird 5 Tage im Cookie `loot_user` gespeichert
-- Jeder kann Lootlisten anlegen und Items eintragen (Name Pflicht; Typ Erz → Qualität, Komponente → Komponenten-Typ)
+- Jeder kann Lootlisten anlegen und Items eintragen (Name Pflicht; Typ Erz → Qualität, Komponente → Komponenten-Typ + Class A–D)
 - Jede Liste hat eine **Pflicht-Deadline**; danach endet das Würfeln automatisch (der Ersteller kann verlängern)
-- Nach „Speichern & freigeben“ darf jeder bis zur Deadline **einmal pro Item** würfeln: **Main 0–100** oder **Twink 0–50**
-- Würfe werden serverseitig erzeugt; Main schlägt Twink, sonst gewinnt der höchste Wert (Gleichstand wird angezeigt)
+- Nach „Speichern & freigeben“ entscheidet jeder bis zur Deadline **einmal pro Item**: **Priorität 0–100**, **Gier 0–50** oder **Kein Interesse** (kann bis zur Deadline zurückgenommen werden)
+- Würfe werden serverseitig erzeugt; Priorität schlägt Gier, sonst gewinnt der höchste Wert (Gleichstand wird angezeigt)
 - Ersteller kann Items als **erledigt** markieren, die Verteilung abschließen, die Liste **archivieren**/wiederherstellen oder löschen
 - Ansicht aktualisiert sich automatisch alle 5 Sekunden
 
