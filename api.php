@@ -25,7 +25,9 @@ set_exception_handler(function (Throwable $e): void {
 require __DIR__ . '/lib/db.php';
 require __DIR__ . '/lib/components.php';
 
+// main = Priorität, twink = Gier (interne Schlüssel bleiben für bestehende Daten gleich).
 const ROLL_MAX = ['main' => 100, 'twink' => 50];
+const ROLL_KINDS = ['main', 'twink', 'pass'];
 const MAX_DEADLINE_DAYS = 365;
 
 /** @return no-return */
@@ -131,9 +133,10 @@ function list_phase(array $list): string
     return $list['status'];
 }
 
-/** Main schlägt Twink, danach höchster Wert. Gibt Gewinner-Namen (mehrere bei Gleichstand) zurück. */
+/** Priorität schlägt Gier, danach höchster Wert. "Kein Interesse" zählt nicht. Gibt Gewinner-Namen (mehrere bei Gleichstand) zurück. */
 function winners(array $rolls): array
 {
+    $rolls = array_filter($rolls, function ($r) { return $r['kind'] !== 'pass'; });
     if (!$rolls) {
         return [];
     }
@@ -167,12 +170,12 @@ function list_detail(int $id): array
         'SELECT r.id, r.item_id, r.username, r.kind, r.value, r.created_at
          FROM rolls r JOIN items i ON i.id = r.item_id
          WHERE i.list_id = ?
-         ORDER BY (r.kind = \'main\') DESC, r.value DESC, r.created_at ASC'
+         ORDER BY CASE r.kind WHEN \'main\' THEN 0 WHEN \'twink\' THEN 1 ELSE 2 END, r.value DESC, r.created_at ASC'
     );
     $stmt->execute([$id]);
     $byItem = [];
     foreach ($stmt->fetchAll() as $roll) {
-        $roll['value'] = (int)$roll['value'];
+        $roll['value'] = $roll['value'] === null ? null : (int)$roll['value'];
         $byItem[$roll['item_id']][] = $roll;
     }
 
@@ -223,7 +226,7 @@ if ($method === 'GET') {
             respond(health());
 
         case 'components':
-            respond(['components' => COMPONENT_TYPES]);
+            respond(['components' => COMPONENT_TYPES, 'classes' => COMPONENT_CLASSES]);
 
         case 'lists':
             $rows = db()->query(
@@ -313,6 +316,7 @@ switch ($action) {
         $type = $input['type'] ?? null;
         $quality = null;
         $componentType = null;
+        $componentClass = null;
         if ($type === 'ore') {
             $q = $input['quality'] ?? null;
             if ($q !== null && $q !== '') {
@@ -329,11 +333,18 @@ switch ($action) {
                 }
                 $componentType = $ct;
             }
+            $cc = $input['component_class'] ?? null;
+            if ($cc !== null && $cc !== '') {
+                if (!is_string($cc) || !in_array($cc, COMPONENT_CLASSES, true)) {
+                    fail('Ungültige Class – erlaubt sind A, B, C und D.');
+                }
+                $componentClass = $cc;
+            }
         } else {
             $type = null;
         }
-        $pdo->prepare('INSERT INTO items (list_id, name, type, quality, component_type, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-            ->execute([$list['id'], $name, $type, $quality, $componentType, $now]);
+        $pdo->prepare('INSERT INTO items (list_id, name, type, quality, component_type, component_class, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+            ->execute([$list['id'], $name, $type, $quality, $componentType, $componentClass, $now]);
         respond(['list' => list_detail((int)$list['id'])]);
 
     case 'delete_item':
@@ -387,7 +398,7 @@ switch ($action) {
 
     case 'roll':
         $kind = $input['kind'] ?? '';
-        if (!is_string($kind) || !isset(ROLL_MAX[$kind])) {
+        if (!is_string($kind) || !in_array($kind, ROLL_KINDS, true)) {
             fail('Ungültige Wurfart.');
         }
         [$list, $done] = find_item_list((int)($input['item_id'] ?? 0));
@@ -404,13 +415,24 @@ switch ($action) {
         }
         try {
             $pdo->prepare('INSERT INTO rolls (item_id, username, kind, value, created_at) VALUES (?, ?, ?, ?, ?)')
-                ->execute([(int)$input['item_id'], $user, $kind, random_int(0, ROLL_MAX[$kind]), $now]);
+                ->execute([(int)$input['item_id'], $user, $kind, $kind === 'pass' ? null : random_int(0, ROLL_MAX[$kind]), $now]);
         } catch (PDOException $e) {
             if (strpos($e->getMessage(), 'UNIQUE') !== false) {
-                fail('Du hast auf dieses Item bereits gewürfelt.', 409);
+                fail('Du hast für dieses Item bereits entschieden.', 409);
             }
             throw $e;
         }
+        respond(['list' => list_detail((int)$list['id'])]);
+
+    case 'unpass':
+        // "Kein Interesse" zurücknehmen, solange noch gewürfelt werden kann.
+        [$list, $done] = find_item_list((int)($input['item_id'] ?? 0));
+        require_not_archived($list);
+        if (list_phase($list) !== 'open' || $done) {
+            fail('Die Entscheidung kann nicht mehr geändert werden.');
+        }
+        $pdo->prepare('DELETE FROM rolls WHERE item_id = ? AND username = ? AND kind = \'pass\'')
+            ->execute([(int)$input['item_id'], $user]);
         respond(['list' => list_detail((int)$list['id'])]);
 }
 

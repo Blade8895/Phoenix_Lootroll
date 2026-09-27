@@ -7,6 +7,8 @@
   const DEFAULT_DEADLINE_HOURS = 24;
   const PHASE_LABEL = { draft: 'Entwurf', open: 'Offen', expired: 'Beendet', closed: 'Abgeschlossen' };
   const TYPE_LABEL = { ore: 'Erz', component: 'Komponente' };
+  // Interne Schlüssel main/twink bleiben, angezeigt wird Priorität/Gier.
+  const KIND_LABEL = { main: 'Priorität', twink: 'Gier', pass: 'Kein Interesse' };
   // API relativ zum Skript auflösen – funktioniert auch, wenn die Seite ohne "/" am Ende aufgerufen wird.
   const API_URL = new URL('../api.php', document.currentScript.src).href;
 
@@ -16,6 +18,7 @@
   const nameInput = document.getElementById('name-input');
 
   let components = {};
+  let componentClasses = ['A', 'B', 'C', 'D'];
   let pollTimer = null;
   let clockSkew = 0; // Serverzeit - Browserzeit (Sekunden)
 
@@ -217,7 +220,7 @@
     app.replaceChildren(
       h('section', { class: 'hero' },
         h('h1', {}, 'Loot', h('span', { class: 'accent' }, 'roll')),
-        h('p', { class: 'muted' }, 'Lootliste anlegen, freigeben – und jeder würfelt bis zur Deadline einmal pro Item. Main 0–100, Twink 0–50. Main schlägt Twink.'),
+        h('p', { class: 'muted' }, 'Lootliste anlegen, freigeben – und jeder würfelt bis zur Deadline einmal pro Item. Priorität 0–100, Gier 0–50 oder Kein Interesse. Priorität schlägt Gier.'),
       ),
       h('section', { class: 'panel' }, h('h2', { class: 'panel-title' }, 'Neue Lootliste'), createForm),
       h('section', {}, h('h2', { class: 'section-title' }, 'Lootlisten'), listWrap),
@@ -249,6 +252,7 @@
     if (item.type) parts.push(h('span', { class: `tag tag-${item.type}` }, TYPE_LABEL[item.type]));
     if (item.type === 'ore' && item.quality !== null) parts.push(h('span', { class: 'tag' }, `Qualität ${item.quality}`));
     if (item.type === 'component' && item.component_type) parts.push(h('span', { class: 'tag' }, item.component_type));
+    if (item.type === 'component' && item.component_class) parts.push(h('span', { class: 'tag tag-class' }, `Class ${item.component_class}`));
     return parts;
   }
 
@@ -265,12 +269,18 @@
       Object.entries(components).map(([group, types]) =>
         h('optgroup', { label: group }, types.map((t) => h('option', { value: t }, t)))),
     );
+    const classEl = h('select', {},
+      h('option', { value: '' }, '—'),
+      componentClasses.map((c) => h('option', { value: c }, `Class ${c}`)),
+    );
     const qualityField = h('label', { class: 'field', hidden: true }, h('span', {}, 'Qualität'), qualityEl);
     const compField = h('label', { class: 'field', hidden: true }, h('span', {}, 'Komponenten-Typ'), compEl);
+    const classField = h('label', { class: 'field field-narrow', hidden: true }, h('span', {}, 'Class'), classEl);
 
     const syncFields = () => {
       qualityField.hidden = typeEl.value !== 'ore';
       compField.hidden = typeEl.value !== 'component';
+      classField.hidden = typeEl.value !== 'component';
     };
     typeEl.addEventListener('change', syncFields);
 
@@ -286,6 +296,7 @@
               type: typeEl.value || null,
               quality: typeEl.value === 'ore' ? qualityEl.value : null,
               component_type: typeEl.value === 'component' ? compEl.value : null,
+              component_class: typeEl.value === 'component' ? classEl.value : null,
             },
           });
           rerender(updated, true);
@@ -296,6 +307,7 @@
       h('label', { class: 'field' }, h('span', {}, 'Typ'), typeEl),
       qualityField,
       compField,
+      classField,
       h('button', { class: 'btn btn-primary', type: 'submit' }, '+ Item hinzufügen'),
     );
   }
@@ -322,6 +334,8 @@
   function buildItemCard(list, item, user, rerender) {
     const isOwner = sameUser(list.created_by, user);
     const myRoll = item.rolls.find((r) => sameUser(r.username, user));
+    const rolls = item.rolls.filter((r) => r.kind !== 'pass');
+    const passes = item.rolls.filter((r) => r.kind === 'pass');
     const winners = item.winners.map((w) => w.toLocaleLowerCase());
     const tie = item.winners.length > 1;
     const canRoll = list.phase === 'open' && !list.archived && !item.done;
@@ -340,7 +354,7 @@
     const roll = async (kind) => {
       const updated = await post('roll', { item_id: item.id, kind });
       const mine = updated && updated.items.find((i) => i.id === item.id).rolls.find((r) => sameUser(r.username, user));
-      if (mine) toast(`${item.name}: ${mine.kind === 'main' ? 'Main' : 'Twink'}-Wurf ${mine.value}`);
+      if (mine) toast(mine.kind === 'pass' ? `${item.name}: Kein Interesse` : `${item.name}: ${KIND_LABEL[mine.kind]}-Wurf ${mine.value}`);
     };
 
     const actions = [];
@@ -353,11 +367,21 @@
     }
     if (canRoll && !myRoll) {
       actions.push(h('div', { class: 'roll-buttons' },
-        h('button', { class: 'btn btn-primary btn-sm', type: 'button', onclick: () => roll('main') }, '🎲 Main (0–100)'),
-        h('button', { class: 'btn btn-secondary btn-sm', type: 'button', onclick: () => roll('twink') }, '🎲 Twink (0–50)'),
+        h('button', { class: 'btn btn-primary btn-sm', type: 'button', onclick: () => roll('main') }, '🎲 Priorität (0–100)'),
+        h('button', { class: 'btn btn-secondary btn-sm', type: 'button', onclick: () => roll('twink') }, '🎲 Gier (0–50)'),
+        h('button', { class: 'btn btn-ghost btn-sm', type: 'button', onclick: () => roll('pass') }, '✖ Kein Interesse'),
       ));
+    } else if (myRoll && myRoll.kind === 'pass') {
+      actions.push(h('span', { class: 'my-roll my-pass' }, 'Kein Interesse'));
+      if (canRoll) {
+        actions.push(h('button', {
+          class: 'btn btn-ghost btn-sm',
+          type: 'button',
+          onclick: () => post('unpass', { item_id: item.id }),
+        }, '↺ Doch würfeln'));
+      }
     } else if (myRoll) {
-      actions.push(h('span', { class: 'my-roll' }, `Dein Wurf: ${myRoll.value} (${myRoll.kind === 'main' ? 'Main' : 'Twink'})`));
+      actions.push(h('span', { class: 'my-roll' }, `Dein Wurf: ${myRoll.value} (${KIND_LABEL[myRoll.kind]})`));
     }
     if (isOwner && list.phase !== 'draft' && !list.archived) {
       actions.push(h('button', {
@@ -367,11 +391,11 @@
       }, item.done ? '↺ Rückgängig' : '✔ Erledigt'));
     }
 
-    const rollRows = item.rolls.map((r) => {
+    const rollRows = rolls.map((r) => {
       const isWinner = winners.includes(r.username.toLocaleLowerCase());
       return h('li', { class: `roll${isWinner ? ' winner' : ''}${sameUser(r.username, user) ? ' mine' : ''}` },
         h('span', { class: 'roll-name' }, isWinner ? '👑 ' : '', r.username),
-        h('span', { class: `roll-kind kind-${r.kind}` }, r.kind === 'main' ? 'Main' : 'Twink'),
+        h('span', { class: `roll-kind kind-${r.kind}` }, KIND_LABEL[r.kind]),
         h('span', { class: 'roll-value' }, r.value),
       );
     });
@@ -379,7 +403,7 @@
     let resultLine = null;
     if (list.phase !== 'draft') {
       const final = list.phase !== 'open' || item.done;
-      if (!item.rolls.length) resultLine = h('p', { class: 'muted small' }, 'Keine Würfe.');
+      if (!rolls.length) resultLine = h('p', { class: 'muted small' }, 'Keine Würfe.');
       else if (tie) resultLine = h('p', { class: 'tie' }, `⚠ Gleichstand: ${item.winners.join(', ')}`);
       else resultLine = h('p', { class: 'winner-line' }, final ? 'Gewinner: ' : 'Führt: ', h('strong', {}, item.winners[0]));
     }
@@ -395,6 +419,9 @@
       ),
       resultLine,
       rollRows.length ? h('ol', { class: 'rolls' }, rollRows) : null,
+      passes.length
+        ? h('p', { class: 'passes muted small' }, 'Kein Interesse: ', passes.map((r) => r.username).join(', '))
+        : null,
     );
   }
 
@@ -457,7 +484,7 @@
       if (list.archived) hint = 'Diese Liste ist archiviert und schreibgeschützt.';
       else if (list.phase === 'draft' && !isOwner) hint = 'Diese Liste wird noch vom Ersteller bearbeitet. Würfeln ist nach der Freigabe möglich.';
       else if (list.phase === 'draft') hint = 'Füge Items hinzu und gib die Liste frei, sobald sie vollständig ist.';
-      else if (list.phase === 'open') hint = 'Du kannst bis zur Deadline auf jedes Item genau einmal würfeln – Main (0–100) oder Twink (0–50). Main-Würfe haben Vorrang.';
+      else if (list.phase === 'open') hint = 'Entscheide dich bis zur Deadline für jedes Item genau einmal: Priorität (0–100), Gier (0–50) oder Kein Interesse. Priorität-Würfe haben Vorrang.';
       else if (list.phase === 'expired') hint = 'Die Deadline ist abgelaufen – es kann nicht mehr gewürfelt werden.';
 
       const doneCount = list.items.filter((i) => i.done).length;
@@ -526,7 +553,11 @@
 
   (async () => {
     renderUser();
-    try { components = (await api('components')).components; } catch (err) { toast(err.message, true); }
+    try {
+      const data = await api('components');
+      components = data.components;
+      if (Array.isArray(data.classes)) componentClasses = data.classes;
+    } catch (err) { toast(err.message, true); }
     route();
   })();
 })();
