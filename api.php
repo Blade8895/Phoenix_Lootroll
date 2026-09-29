@@ -162,7 +162,7 @@ function list_detail(int $id): array
 {
     $list = normalize_list(find_list($id));
 
-    $stmt = db()->prepare('SELECT * FROM items WHERE list_id = ? ORDER BY id');
+    $stmt = db()->prepare('SELECT * FROM items WHERE list_id = ? ORDER BY id DESC');
     $stmt->execute([$id]);
     $items = $stmt->fetchAll();
 

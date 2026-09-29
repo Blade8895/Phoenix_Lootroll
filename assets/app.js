@@ -2,7 +2,7 @@
   'use strict';
 
   const COOKIE = 'loot_user';
-  const COOKIE_DAYS = 5;
+  const COOKIE_DAYS = 365;
   const POLL_MS = 5000;
   const DEFAULT_DEADLINE_HOURS = 24;
   const PHASE_LABEL = { draft: 'Entwurf', open: 'Offen', expired: 'Beendet', closed: 'Abgeschlossen' };
@@ -425,6 +425,36 @@
     );
   }
 
+  /** Wer hat schon abgestimmt? Zählt jede Entscheidung (auch Kein Interesse); erledigte Items zählen nur, wenn dort entschieden wurde. */
+  function participants(list) {
+    const open = list.items.filter((i) => !i.done).length;
+    const byName = new Map();
+    for (const item of list.items) {
+      for (const r of item.rolls) {
+        const key = r.username.toLocaleLowerCase();
+        if (!byName.has(key)) byName.set(key, { name: r.username, decided: 0, openDecided: 0 });
+        const p = byName.get(key);
+        p.decided++;
+        if (!item.done) p.openDecided++;
+      }
+    }
+    return [...byName.values()]
+      .map((p) => ({ ...p, complete: p.openDecided >= open }))
+      .sort((a, b) => (b.complete - a.complete) || a.name.localeCompare(b.name, 'de', { sensitivity: 'base' }));
+  }
+
+  function participantsInfo(list, user) {
+    const people = participants(list);
+    if (!people.length) return h('p', { class: 'participants muted small' }, '👥 Noch niemand hat abgestimmt.');
+    return h('div', { class: 'participants' },
+      h('span', { class: 'participants-label small' }, `👥 Abgestimmt (${people.length}):`),
+      people.map((p) => h('span', {
+        class: `participant${p.complete ? ' complete' : ''}${sameUser(p.name, user) ? ' mine' : ''}`,
+        title: p.complete ? 'Hat bei allen offenen Items entschieden' : 'Noch nicht bei allen Items entschieden',
+      }, p.complete ? '✔ ' : '', p.name, h('span', { class: 'participant-count' }, ` ${p.decided}/${list.items.length}`))),
+    );
+  }
+
   async function renderList(id) {
     stopPolling();
     const user = getUser();
@@ -502,6 +532,7 @@
               `Erstellt von ${list.created_by} · ${formatDate(list.created_at)} · ${list.items.length} Items`,
               list.phase !== 'draft' ? ` · ${doneCount} erledigt` : null),
             h('p', { class: 'small' }, deadlineInfo(list)),
+            list.phase !== 'draft' ? participantsInfo(list, user) : null,
             hint && h('p', { class: 'hint' }, hint),
             editable && (list.phase === 'draft' || list.phase === 'open' || list.phase === 'expired')
               ? buildDeadlineForm(list, rerender) : null,
@@ -552,6 +583,8 @@
   window.addEventListener('hashchange', route);
 
   (async () => {
+    // Cookie-Laufzeit bei jedem Besuch erneuern.
+    if (getUser()) setUser(getUser());
     renderUser();
     try {
       const data = await api('components');
