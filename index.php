@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="assets/style.css?v=3">
+  <link rel="stylesheet" href="assets/style.css?v=4">
 </head>
 <body>
   <div class="starfield" aria-hidden="true"></div>
@@ -40,7 +40,7 @@
     <form method="dialog" id="name-form">
       <img src="assets/logo-mark.png" alt="" class="dialog-logo">
       <h2>Identifiziere dich, Pilot</h2>
-      <p class="muted">Kein Login nötig – dein Name wird 5 Tage in einem Cookie gespeichert.</p>
+      <p class="muted">Kein Login nötig – dein Name wird 365 Tage in einem Cookie gespeichert.</p>
       <label class="field">
         <span>Username</span>
         <input type="text" id="name-input" maxlength="32" required autocomplete="nickname" placeholder="z. B. Blade">
@@ -51,6 +51,6 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="assets/app.js?v=3"></script>
+  <script src="assets/app.js?v=4"></script>
 </body>
 </html>

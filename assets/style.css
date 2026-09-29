@@ -276,6 +276,21 @@ select option, select optgroup { background: var(--panel-solid); color: var(--te
 .my-roll.my-pass { color: var(--muted); }
 .passes { margin: 8px 0 0; }
 
+/* ===== Teilnehmer-Übersicht ===== */
+.participants { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 0; }
+.participants-label { color: var(--muted); font-weight: 600; margin-right: 2px; }
+.participant {
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 1px 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--muted);
+}
+.participant.complete { color: var(--success); border-color: rgba(62, 207, 142, 0.45); }
+.participant.mine { background: rgba(232, 118, 42, 0.12); }
+.participant-count { font-weight: 500; opacity: 0.75; }
+
 .winner-line, .tie { margin: 12px 0 0; }
 .winner-line strong { color: var(--gold); font-family: var(--font-head); font-size: 0.95rem; }
 .tie { color: var(--danger); font-weight: 600; }
