@@ -23,7 +23,7 @@ set_exception_handler(function (Throwable $e): void {
 });
 
 require __DIR__ . '/lib/db.php';
-require __DIR__ . '/lib/components.php';
+require __DIR__ . '/lib/catalog.php';
 
 // main = Priorität, twink = Gier (interne Schlüssel bleiben für bestehende Daten gleich).
 const ROLL_MAX = ['main' => 100, 'twink' => 50];
@@ -62,6 +62,30 @@ function clean_text($value, int $max): string
 {
     $value = is_string($value) ? trim(preg_replace('/\s+/u', ' ', $value) ?? '') : '';
     return str_cut($value, $max);
+}
+
+/** Optionaler Wert aus einer festen Auswahlliste (leer = null). */
+function pick_option($value, array $allowed, string $label): ?string
+{
+    if ($value === null || $value === '') {
+        return null;
+    }
+    if (!is_string($value) || !in_array($value, $allowed, true)) {
+        fail("Ungültige Angabe für $label.");
+    }
+    return $value;
+}
+
+/** Optionale Zahl im Bereich (leer = null). */
+function pick_number($value, float $min, float $max, string $label, bool $integer)
+{
+    if ($value === null || $value === '') {
+        return null;
+    }
+    if (!is_numeric($value) || (float)$value < $min || (float)$value > $max || ($integer && floor((float)$value) != (float)$value)) {
+        fail(sprintf('%s muss eine %s zwischen %s und %s sein.', $label, $integer ? 'ganze Zahl' : 'Zahl', $min + 0, $max + 0));
+    }
+    return $integer ? (int)$value : round((float)$value, 2);
 }
 
 function current_user(): string
@@ -182,6 +206,8 @@ function list_detail(int $id): array
     foreach ($items as &$item) {
         $item['id'] = (int)$item['id'];
         $item['quality'] = $item['quality'] === null ? null : (int)$item['quality'];
+        $item['size'] = $item['size'] === null ? null : (int)$item['size'];
+        $item['quantity'] = $item['quantity'] === null ? null : (float)$item['quantity'];
         $item['done'] = (int)$item['done'] === 1;
         $item['rolls'] = $byItem[$item['id']] ?? [];
         $item['winners'] = winners($item['rolls']);
@@ -200,6 +226,8 @@ function health(): array
         'php_ok' => version_compare(PHP_VERSION, '7.4.0', '>='),
         'pdo_sqlite' => extension_loaded('pdo_sqlite'),
         'mbstring' => extension_loaded('mbstring'),
+        'curl' => function_exists('curl_init'),
+        'allow_url_fopen' => filter_var(ini_get('allow_url_fopen'), FILTER_VALIDATE_BOOLEAN),
         'data_dir_writable' => is_dir(DATA_DIR) && is_writable(DATA_DIR),
         'db_write' => false,
     ];
@@ -213,6 +241,7 @@ function health(): array
     } catch (Throwable $e) {
         $checks['db_error'] = $e->getMessage();
     }
+    $checks['catalog'] = catalog_status();
     $checks['ok'] = $checks['php_ok'] && $checks['pdo_sqlite'] && $checks['db_write'];
     return $checks;
 }
@@ -225,8 +254,24 @@ if ($method === 'GET') {
         case 'health':
             respond(health());
 
-        case 'components':
-            respond(['components' => COMPONENT_TYPES, 'classes' => COMPONENT_CLASSES]);
+        case 'options':
+            respond([
+                'categories' => COMPONENT_CATEGORIES,
+                'classes' => COMPONENT_CLASSES,
+                'grades' => COMPONENT_GRADES,
+                'weapon_types' => WEAPON_TYPES,
+                'item_types' => ITEM_TYPES,
+                'armor' => ARMOR_WEIGHTS,
+                'max_size' => MAX_SIZE,
+            ]);
+
+        case 'catalog':
+            $kind = $_GET['kind'] ?? '';
+            if (!is_string($kind) || !isset(CATALOG_SOURCES[$kind])) {
+                fail('Unbekannter Katalog.');
+            }
+            header('Cache-Control: private, max-age=300');
+            respond(catalog($kind));
 
         case 'lists':
             $rows = db()->query(
@@ -314,37 +359,41 @@ switch ($action) {
             fail('Der Name ist ein Pflichtfeld.');
         }
         $type = $input['type'] ?? null;
-        $quality = null;
-        $componentType = null;
-        $componentClass = null;
-        if ($type === 'ore') {
-            $q = $input['quality'] ?? null;
-            if ($q !== null && $q !== '') {
-                if (!is_numeric($q) || (int)$q < 0 || (int)$q > 1000) {
-                    fail('Qualität muss zwischen 0 und 1000 liegen.');
-                }
-                $quality = (int)$q;
-            }
-        } elseif ($type === 'component') {
-            $ct = clean_text($input['component_type'] ?? '', 60);
-            if ($ct !== '') {
-                if (!component_type_valid($ct)) {
-                    fail('Unbekannter Komponenten-Typ.');
-                }
-                $componentType = $ct;
-            }
-            $cc = $input['component_class'] ?? null;
-            if ($cc !== null && $cc !== '') {
-                if (!is_string($cc) || !in_array($cc, COMPONENT_CLASSES, true)) {
-                    fail('Ungültige Class – erlaubt sind A, B, C und D.');
-                }
-                $componentClass = $cc;
-            }
-        } else {
-            $type = null;
+        if (!is_string($type) || !in_array($type, ITEM_KINDS, true)) {
+            fail('Bitte eine Art wählen (Komponente, Schiffswaffe, Commodity oder Item).');
         }
-        $pdo->prepare('INSERT INTO items (list_id, name, type, quality, component_type, component_class, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-            ->execute([$list['id'], $name, $type, $quality, $componentType, $componentClass, $now]);
+        $row = [
+            'quality' => null, 'component_type' => null, 'component_class' => null, 'size' => null,
+            'item_class' => null, 'subtype' => null, 'armor' => null, 'manufacturer' => null, 'quantity' => null,
+        ];
+        if ($type === 'component') {
+            $row['component_type'] = pick_option($input['component_type'] ?? null, array_keys(COMPONENT_CATEGORIES), 'Kategorie');
+            if ($row['component_type'] === null) {
+                fail('Bitte eine Kategorie wählen.');
+            }
+            $row['item_class'] = pick_option($input['item_class'] ?? null, COMPONENT_CLASSES, 'Klasse');
+            $row['component_class'] = pick_option($input['component_class'] ?? null, COMPONENT_GRADES, 'Grade');
+            $row['size'] = pick_number($input['size'] ?? null, 0, MAX_SIZE, 'Size', true);
+        } elseif ($type === 'weapon') {
+            $row['size'] = pick_number($input['size'] ?? null, 0, MAX_SIZE, 'Size', true);
+            $row['subtype'] = pick_option($input['subtype'] ?? null, WEAPON_TYPES, 'Typ');
+            $row['manufacturer'] = clean_text($input['manufacturer'] ?? '', 60) ?: null;
+        } elseif ($type === 'commodity') {
+            $row['quantity'] = pick_number($input['quantity'] ?? null, 0.01, 1000000, 'Menge', false);
+            $row['quality'] = pick_number($input['quality'] ?? null, 0, 1000, 'Qualität', true);
+        } else {
+            $row['subtype'] = pick_option($input['subtype'] ?? null, ITEM_TYPES, 'Typ');
+            $row['armor'] = pick_option($input['armor'] ?? null, ARMOR_WEIGHTS, 'Rüstungsklasse');
+            $row['manufacturer'] = clean_text($input['manufacturer'] ?? '', 60) ?: null;
+            $row['quantity'] = pick_number($input['quantity'] ?? null, 1, 10000, 'Anzahl', true);
+        }
+        $pdo->prepare(
+            'INSERT INTO items (list_id, name, type, quality, component_type, component_class, size, item_class, subtype, armor, manufacturer, quantity, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        )->execute([
+            $list['id'], $name, $type, $row['quality'], $row['component_type'], $row['component_class'], $row['size'],
+            $row['item_class'], $row['subtype'], $row['armor'], $row['manufacturer'], $row['quantity'], $now,
+        ]);
         respond(['list' => list_detail((int)$list['id'])]);
 
     case 'delete_item':

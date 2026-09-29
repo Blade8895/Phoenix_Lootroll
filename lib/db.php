@@ -44,7 +44,7 @@ function db(): PDO
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             list_id         INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
             name            TEXT    NOT NULL,
-            type            TEXT    NULL CHECK (type IS NULL OR type IN ('ore','component')),
+            type            TEXT    NULL CHECK (type IS NULL OR type IN ('ore','component','weapon','commodity','item')),
             quality         INTEGER NULL,
             component_type  TEXT    NULL,
             created_at      INTEGER NOT NULL
@@ -66,8 +66,15 @@ function db(): PDO
     add_column($pdo, 'lists', 'deadline', 'INTEGER NULL');
     add_column($pdo, 'lists', 'archived', 'INTEGER NOT NULL DEFAULT 0');
     add_column($pdo, 'items', 'done', 'INTEGER NOT NULL DEFAULT 0');
-    add_column($pdo, 'items', 'component_class', 'TEXT NULL');
+    add_column($pdo, 'items', 'component_class', 'TEXT NULL'); // Grade A–D
+    add_column($pdo, 'items', 'size', 'INTEGER NULL');
+    add_column($pdo, 'items', 'item_class', 'TEXT NULL');   // Military, Civilian …
+    add_column($pdo, 'items', 'subtype', 'TEXT NULL');      // Waffentyp bzw. Item-Typ
+    add_column($pdo, 'items', 'armor', 'TEXT NULL');
+    add_column($pdo, 'items', 'manufacturer', 'TEXT NULL');
+    add_column($pdo, 'items', 'quantity', 'REAL NULL');
     migrate_rolls_pass($pdo);
+    migrate_item_types($pdo);
 
     return $pdo;
 }
@@ -109,5 +116,49 @@ function migrate_rolls_pass(PDO $pdo): void
     } catch (Throwable $e) {
         $pdo->rollBack();
         throw $e;
+    }
+}
+
+/** Alte items-Tabelle erlaubt als Typ nur ore/component – Tabelle mit erweitertem CHECK neu aufbauen. */
+function migrate_item_types(PDO $pdo): void
+{
+    $sql = (string)$pdo->query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'")->fetchColumn();
+    if ($sql === '' || strpos($sql, "'weapon'") !== false) {
+        return;
+    }
+    $columns = 'id, list_id, name, type, quality, component_type, created_at, done, component_class, size, item_class, subtype, armor, manufacturer, quantity';
+    // Ohne Fremdschlüssel-Prüfung, sonst löscht DROP TABLE per Cascade alle Würfe.
+    $pdo->exec('PRAGMA foreign_keys = OFF');
+    $pdo->beginTransaction();
+    try {
+        $pdo->exec("
+            CREATE TABLE items_new (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                list_id         INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+                name            TEXT    NOT NULL,
+                type            TEXT    NULL CHECK (type IS NULL OR type IN ('ore','component','weapon','commodity','item')),
+                quality         INTEGER NULL,
+                component_type  TEXT    NULL,
+                created_at      INTEGER NOT NULL,
+                done            INTEGER NOT NULL DEFAULT 0,
+                component_class TEXT    NULL,
+                size            INTEGER NULL,
+                item_class      TEXT    NULL,
+                subtype         TEXT    NULL,
+                armor           TEXT    NULL,
+                manufacturer    TEXT    NULL,
+                quantity        REAL    NULL
+            );
+            INSERT INTO items_new ($columns) SELECT $columns FROM items;
+            DROP TABLE items;
+            ALTER TABLE items_new RENAME TO items;
+            CREATE INDEX IF NOT EXISTS idx_items_list ON items(list_id);
+        ");
+        $pdo->commit();
+    } catch (Throwable $e) {
+        $pdo->rollBack();
+        throw $e;
+    } finally {
+        $pdo->exec('PRAGMA foreign_keys = ON');
     }
 }
