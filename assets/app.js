@@ -6,7 +6,10 @@
   const POLL_MS = 5000;
   const DEFAULT_DEADLINE_HOURS = 24;
   const PHASE_LABEL = { draft: 'Entwurf', open: 'Offen', expired: 'Beendet', closed: 'Abgeschlossen' };
-  const TYPE_LABEL = { ore: 'Erz', component: 'Komponente' };
+  const TYPE_LABEL = { ore: 'Erz', component: 'Komponente', weapon: 'Schiffswaffe', commodity: 'Commodity', item: 'Item' };
+  const KIND_ORDER = ['component', 'weapon', 'commodity', 'item'];
+  const ARMOR_TYPES = ['Helm', 'Brustpanzerung', 'Armpanzerung', 'Beinpanzerung', 'Rucksack'];
+  const SUGGEST_LIMIT = 60;
   // Interne Schlüssel main/twink bleiben, angezeigt wird Priorität/Gier.
   const KIND_LABEL = { main: 'Priorität', twink: 'Gier', pass: 'Kein Interesse' };
   // API relativ zum Skript auflösen – funktioniert auch, wenn die Seite ohne "/" am Ende aufgerufen wird.
@@ -17,8 +20,18 @@
   const nameDialog = document.getElementById('name-dialog');
   const nameInput = document.getElementById('name-input');
 
-  let components = {};
-  let componentClasses = ['A', 'B', 'C', 'D'];
+  // Auswahllisten vom Server (Fallback, falls der Abruf scheitert).
+  let options = {
+    categories: { 'Power Plant': 'Power Plant', Cooler: 'Kühler', 'Shield Generator': 'Schild', 'Quantum Drive': 'Quantum Drive', Radar: 'Radar' },
+    classes: ['Military', 'Civilian', 'Industrial', 'Stealth', 'Competition'],
+    grades: ['A', 'B', 'C', 'D'],
+    weapon_types: ['Energie', 'Ballistisch', 'Distortion'],
+    item_types: ['Sonstiges'],
+    armor: ['Leicht', 'Mittel', 'Schwer'],
+    max_size: 12,
+  };
+  const catalogs = {}; // kind -> { promise, items, error }
+  let lastKind = 'component';
   let pollTimer = null;
   let clockSkew = 0; // Serverzeit - Browserzeit (Sekunden)
 
@@ -247,69 +260,307 @@
 
   // ---------- List detail ----------
 
+  const fmtNumber = (n) => Number(n).toLocaleString('de-DE', { maximumFractionDigits: 2 });
+
   function itemMeta(item) {
+    const tag = (text, cls = '') => h('span', { class: `tag${cls ? ' ' + cls : ''}` }, text);
     const parts = [];
-    if (item.type) parts.push(h('span', { class: `tag tag-${item.type}` }, TYPE_LABEL[item.type]));
-    if (item.type === 'ore' && item.quality !== null) parts.push(h('span', { class: 'tag' }, `Qualität ${item.quality}`));
-    if (item.type === 'component' && item.component_type) parts.push(h('span', { class: 'tag' }, item.component_type));
-    if (item.type === 'component' && item.component_class) parts.push(h('span', { class: 'tag tag-class' }, `Class ${item.component_class}`));
+    if (item.type) parts.push(tag(TYPE_LABEL[item.type] || item.type, `tag-${item.type}`));
+    switch (item.type) {
+      case 'ore':
+        if (item.quality !== null) parts.push(tag(`Qualität ${item.quality}`));
+        break;
+      case 'component':
+        if (item.component_type) parts.push(tag(options.categories[item.component_type] || item.component_type));
+        if (item.size !== null) parts.push(tag(`S${item.size}`));
+        if (item.item_class) parts.push(tag(item.item_class));
+        if (item.component_class) parts.push(tag(`Grade ${item.component_class}`, 'tag-class'));
+        break;
+      case 'weapon':
+        if (item.size !== null) parts.push(tag(`S${item.size}`));
+        if (item.subtype) parts.push(tag(item.subtype, 'tag-class'));
+        if (item.manufacturer) parts.push(tag(item.manufacturer));
+        break;
+      case 'commodity':
+        if (item.quantity !== null) parts.push(tag(`Menge ${fmtNumber(item.quantity)}`, 'tag-class'));
+        if (item.quality !== null) parts.push(tag(`Qualität ${item.quality}`));
+        break;
+      case 'item':
+        if (item.subtype) parts.push(tag(item.subtype, 'tag-class'));
+        if (item.armor) parts.push(tag(item.armor));
+        if (item.manufacturer) parts.push(tag(item.manufacturer));
+        if (item.quantity !== null && item.quantity > 1) parts.push(tag(`× ${fmtNumber(item.quantity)}`));
+        break;
+    }
     return parts;
   }
 
-  function buildItemForm(list, rerender) {
-    const nameEl = h('input', { type: 'text', maxlength: 100, required: true, placeholder: 'z. B. Quantanium, FR-86 Shield …' });
-    const typeEl = h('select', {},
-      h('option', { value: '' }, '— kein Typ —'),
-      h('option', { value: 'ore' }, 'Erz'),
-      h('option', { value: 'component' }, 'Komponente'),
-    );
-    const qualityEl = h('input', { type: 'number', min: 0, max: 1000, step: 1, placeholder: '0 – 1000' });
-    const compEl = h('select', {},
-      h('option', { value: '' }, '— Komponenten-Typ wählen —'),
-      Object.entries(components).map(([group, types]) =>
-        h('optgroup', { label: group }, types.map((t) => h('option', { value: t }, t)))),
-    );
-    const classEl = h('select', {},
-      h('option', { value: '' }, '—'),
-      componentClasses.map((c) => h('option', { value: c }, `Class ${c}`)),
-    );
-    const qualityField = h('label', { class: 'field', hidden: true }, h('span', {}, 'Qualität'), qualityEl);
-    const compField = h('label', { class: 'field', hidden: true }, h('span', {}, 'Komponenten-Typ'), compEl);
-    const classField = h('label', { class: 'field field-narrow', hidden: true }, h('span', {}, 'Class'), classEl);
+  // ---------- Katalog & Vorschlagsliste ----------
 
-    const syncFields = () => {
-      qualityField.hidden = typeEl.value !== 'ore';
-      compField.hidden = typeEl.value !== 'component';
-      classField.hidden = typeEl.value !== 'component';
+  /** Lädt den Katalog einer Art einmal pro Seitenaufruf. */
+  function loadCatalog(kind) {
+    if (!catalogs[kind]) {
+      const entry = { items: [], error: null };
+      entry.promise = api('catalog', { params: { kind } })
+        .then((data) => { entry.items = data.items || []; entry.error = data.error; })
+        .catch((err) => { entry.error = err.message; });
+      catalogs[kind] = entry;
+    }
+    return catalogs[kind];
+  }
+
+  const normalize = (text) => text.toLocaleLowerCase('de').normalize('NFD').replace(/[̀-ͯ]/g, '');
+
+  /** Eingabefeld mit Vorschlagsliste, die sich beim Tippen verkleinert. Freie Eingabe bleibt möglich. */
+  function combobox({ placeholder, entries, describe, onPick }) {
+    const input = h('input', { type: 'text', maxlength: 100, required: true, placeholder, autocomplete: 'off', role: 'combobox', 'aria-expanded': 'false' });
+    const listEl = h('ul', { class: 'suggest', role: 'listbox', hidden: true });
+    let matches = [];
+    let active = -1;
+
+    const close = () => { listEl.hidden = true; input.setAttribute('aria-expanded', 'false'); active = -1; };
+    const highlight = (index) => {
+      active = index;
+      [...listEl.children].forEach((li, i) => li.classList.toggle('active', i === index));
+      if (listEl.children[index]) listEl.children[index].scrollIntoView({ block: 'nearest' });
     };
-    typeEl.addEventListener('change', syncFields);
+    const pick = (entry) => {
+      input.value = entry.n;
+      close();
+      onPick(entry);
+    };
+    const open = () => {
+      const tokens = normalize(input.value.trim()).split(/\s+/).filter(Boolean);
+      const all = entries();
+      matches = all.filter((e) => { const n = normalize(e.n); return tokens.every((t) => n.includes(t)); });
+      // Treffer am Wortanfang zuerst
+      if (tokens.length) matches.sort((a, b) => normalize(b.n).startsWith(tokens[0]) - normalize(a.n).startsWith(tokens[0]));
+      const shown = matches.slice(0, SUGGEST_LIMIT);
+      listEl.replaceChildren(...shown.map((e) => h('li', {
+        role: 'option',
+        onmousedown: (ev) => { ev.preventDefault(); pick(e); },
+      }, h('span', { class: 'suggest-name' }, e.n), h('span', { class: 'suggest-meta' }, describe(e)))));
+      if (matches.length > shown.length) {
+        listEl.append(h('li', { class: 'suggest-more' }, `… ${matches.length - shown.length} weitere – weiter tippen`));
+      }
+      if (!shown.length) {
+        listEl.append(h('li', { class: 'suggest-more' }, all.length ? 'Kein Treffer – freie Eingabe möglich' : 'Kein Katalog – freie Eingabe möglich'));
+      }
+      listEl.hidden = false;
+      input.setAttribute('aria-expanded', 'true');
+      active = -1;
+    };
 
-    return h('form', {
+    input.addEventListener('input', () => {
+      open();
+      const exact = entries().find((e) => normalize(e.n) === normalize(input.value.trim()));
+      if (exact) onPick(exact);
+    });
+    input.addEventListener('focus', open);
+    input.addEventListener('blur', close);
+    input.addEventListener('keydown', (e) => {
+      const count = Math.min(matches.length, SUGGEST_LIMIT);
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (listEl.hidden) open();
+        else if (count) highlight((active + 1) % count);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (count) highlight((active - 1 + count) % count);
+      } else if (e.key === 'Enter' && !listEl.hidden && active >= 0) {
+        e.preventDefault();
+        pick(matches[active]);
+      } else if (e.key === 'Escape' && !listEl.hidden) {
+        e.preventDefault();
+        close();
+      }
+    });
+
+    return { input, el: h('div', { class: 'combo' }, input, listEl), refresh: () => { if (document.activeElement === input) open(); } };
+  }
+
+  // ---------- Item-Formular ----------
+
+  const field = (label, control, cls = '') => h('label', { class: `field${cls ? ' ' + cls : ''}` }, h('span', {}, label), control);
+  const selectEl = (placeholder, values, labels = {}) => h('select', {},
+    h('option', { value: '' }, placeholder),
+    values.map((v) => h('option', { value: v }, labels[v] || v)));
+  const sizeInput = () => h('input', { type: 'number', min: 0, max: options.max_size, step: 1, placeholder: 'z. B. 2' });
+  /** Setzt einen Auto-Wert; unbekannte Werte werden ignoriert. */
+  const setValue = (el, value) => {
+    if (value === undefined || value === null) { el.value = ''; return; }
+    el.value = String(value);
+    if (el.tagName === 'SELECT' && el.value !== String(value)) el.value = '';
+  };
+
+  /** Felder je Art: liefert { fields, values(), catalog? }. */
+  const KIND_FORMS = {
+    component() {
+      const catEl = selectEl('— Kategorie wählen —', Object.keys(options.categories), options.categories);
+      catEl.required = true;
+      const classEl = selectEl('—', options.classes);
+      const gradeEl = selectEl('—', options.grades);
+      const sizeEl = sizeInput();
+      const combo = combobox({
+        placeholder: 'Name tippen, z. B. FR-86',
+        entries: () => loadCatalog('component').items.filter((e) => !catEl.value || e.c === catEl.value),
+        describe: (e) => [e.s !== undefined ? `S${e.s}` : null, e.k, e.g ? `Grade ${e.g}` : null, catEl.value ? null : options.categories[e.c]].filter(Boolean).join(' · '),
+        onPick: (e) => {
+          setValue(catEl, e.c);
+          setValue(classEl, e.k);
+          setValue(gradeEl, e.g);
+          setValue(sizeEl, e.s);
+        },
+      });
+      catEl.addEventListener('change', combo.refresh);
+      return {
+        catalog: 'component',
+        nameInput: combo.input,
+        fields: [
+          field('Kategorie *', catEl),
+          field('Name *', combo.el, 'grow'),
+          field('Klasse', classEl),
+          field('Grade', gradeEl, 'field-narrow'),
+          field('Size', sizeEl, 'field-narrow'),
+        ],
+        values: () => ({ component_type: catEl.value, item_class: classEl.value, component_class: gradeEl.value, size: sizeEl.value }),
+      };
+    },
+
+    weapon() {
+      const sizeEl = sizeInput();
+      const typeEl = selectEl('—', options.weapon_types);
+      const manuEl = h('input', { type: 'text', maxlength: 60, placeholder: 'automatisch' });
+      const combo = combobox({
+        placeholder: 'Waffe tippen, z. B. Attrition',
+        entries: () => loadCatalog('weapon').items,
+        describe: (e) => [e.s !== undefined ? `S${e.s}` : null, e.t, e.m].filter(Boolean).join(' · '),
+        onPick: (e) => {
+          setValue(sizeEl, e.s);
+          setValue(typeEl, e.t);
+          setValue(manuEl, e.m);
+        },
+      });
+      return {
+        catalog: 'weapon',
+        nameInput: combo.input,
+        fields: [
+          field('Waffe *', combo.el, 'grow'),
+          field('Size', sizeEl, 'field-narrow'),
+          field('Typ', typeEl),
+          field('Hersteller', manuEl),
+        ],
+        values: () => ({ size: sizeEl.value, subtype: typeEl.value, manufacturer: manuEl.value }),
+      };
+    },
+
+    commodity() {
+      const nameEl = h('input', { type: 'text', maxlength: 100, required: true, placeholder: 'z. B. Quantanium' });
+      const qtyEl = h('input', { type: 'number', min: 0.01, step: 'any', placeholder: 'z. B. 32' });
+      const qualityEl = h('input', { type: 'number', min: 0, max: 1000, step: 1, placeholder: '0 – 1000' });
+      return {
+        nameInput: nameEl,
+        fields: [
+          field('Name *', nameEl, 'grow'),
+          field('Menge', qtyEl, 'field-narrow'),
+          field('Qualität', qualityEl, 'field-narrow'),
+        ],
+        values: () => ({ quantity: qtyEl.value, quality: qualityEl.value }),
+      };
+    },
+
+    item() {
+      const typeEl = selectEl('— Typ —', options.item_types);
+      const armorEl = selectEl('—', options.armor);
+      const manuEl = h('input', { type: 'text', maxlength: 60, placeholder: 'automatisch' });
+      const qtyEl = h('input', { type: 'number', min: 1, step: 1, value: 1 });
+      const armorField = field('Rüstungsklasse', armorEl);
+      const syncArmor = () => {
+        armorField.hidden = !ARMOR_TYPES.includes(typeEl.value);
+        if (armorField.hidden) armorEl.value = '';
+      };
+      typeEl.addEventListener('change', syncArmor);
+      syncArmor();
+      const combo = combobox({
+        placeholder: 'Item tippen, z. B. P4-AR',
+        entries: () => loadCatalog('item').items,
+        describe: (e) => [e.t, e.a, e.m].filter(Boolean).join(' · '),
+        onPick: (e) => {
+          setValue(typeEl, e.t);
+          syncArmor();
+          setValue(armorEl, e.a);
+          setValue(manuEl, e.m);
+        },
+      });
+      return {
+        catalog: 'item',
+        nameInput: combo.input,
+        fields: [
+          field('Item-Name *', combo.el, 'grow'),
+          field('Typ', typeEl),
+          armorField,
+          field('Hersteller', manuEl),
+          field('Anzahl', qtyEl, 'field-narrow'),
+        ],
+        values: () => ({ subtype: typeEl.value, armor: armorEl.value, manufacturer: manuEl.value, quantity: qtyEl.value }),
+      };
+    },
+  };
+
+  function buildItemForm(list, rerender) {
+    const kindEl = h('select', {}, KIND_ORDER.map((k) => h('option', { value: k }, TYPE_LABEL[k])));
+    kindEl.value = lastKind;
+    const fieldsWrap = h('div', { class: 'item-fields' });
+    const statusEl = h('p', { class: 'catalog-status muted small' });
+    let current = null;
+
+    const showStatus = (kind) => {
+      const cat = loadCatalog(kind);
+      statusEl.hidden = false;
+      statusEl.classList.remove('error-text');
+      statusEl.textContent = 'Katalog wird geladen …';
+      cat.promise.then(() => {
+        if (kindEl.value !== kind) return;
+        if (cat.items.length) {
+          statusEl.textContent = `${cat.items.length} Einträge im Katalog – Felder werden bei Auswahl automatisch ausgefüllt.`;
+        } else {
+          statusEl.textContent = `Katalog nicht verfügbar${cat.error ? ` (${cat.error})` : ''} – freie Eingabe möglich.`;
+          statusEl.classList.add('error-text');
+        }
+      });
+    };
+
+    const build = () => {
+      lastKind = kindEl.value;
+      current = KIND_FORMS[kindEl.value]();
+      fieldsWrap.replaceChildren(...current.fields);
+      if (current.catalog) showStatus(current.catalog);
+      else statusEl.hidden = true;
+    };
+    kindEl.addEventListener('change', () => { build(); current.nameInput.focus(); });
+    build();
+
+    const form = h('form', {
       class: 'item-form',
       onsubmit: async (e) => {
         e.preventDefault();
         try {
           const { list: updated } = await api('add_item', {
-            body: {
-              list_id: list.id,
-              name: nameEl.value,
-              type: typeEl.value || null,
-              quality: typeEl.value === 'ore' ? qualityEl.value : null,
-              component_type: typeEl.value === 'component' ? compEl.value : null,
-              component_class: typeEl.value === 'component' ? classEl.value : null,
-            },
+            body: { list_id: list.id, type: kindEl.value, name: current.nameInput.value, ...current.values() },
           });
           rerender(updated, true);
         } catch (err) { toast(err.message, true); }
       },
     },
-      h('label', { class: 'field' }, h('span', {}, 'Name *'), nameEl),
-      h('label', { class: 'field' }, h('span', {}, 'Typ'), typeEl),
-      qualityField,
-      compField,
-      classField,
+      h('div', { class: 'item-form-row' },
+        field('Art *', kindEl, 'field-kind'),
+        fieldsWrap,
+      ),
+      statusEl,
       h('button', { class: 'btn btn-primary', type: 'submit' }, '+ Item hinzufügen'),
     );
+    form.focusName = () => current.nameInput.focus();
+    return form;
   }
 
   function buildDeadlineForm(list, rerender) {
@@ -540,7 +791,7 @@
           ownerActions.length ? h('div', { class: 'actions' }, ownerActions) : null,
         ),
         formEl && list.phase === 'draft' && editable
-          ? h('section', { class: 'panel' }, h('h2', { class: 'panel-title' }, 'Item hinzufügen'), formEl)
+          ? h('section', { class: 'panel panel-unclipped' }, h('h2', { class: 'panel-title' }, 'Item hinzufügen'), formEl)
           : null,
         h('section', { class: 'items' },
           list.items.length
@@ -548,7 +799,7 @@
             : h('p', { class: 'muted empty' }, 'Noch keine Items in dieser Liste.'),
         ),
       ].filter(Boolean));
-      if (resetForm && formEl) formEl.querySelector('input').focus();
+      if (resetForm && formEl) formEl.focusName();
     };
 
     try {
@@ -587,9 +838,7 @@
     if (getUser()) setUser(getUser());
     renderUser();
     try {
-      const data = await api('components');
-      components = data.components;
-      if (Array.isArray(data.classes)) componentClasses = data.classes;
+      options = { ...options, ...(await api('options')) };
     } catch (err) { toast(err.message, true); }
     route();
   })();

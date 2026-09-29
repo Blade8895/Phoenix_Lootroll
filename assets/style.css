@@ -214,6 +214,9 @@ h1, h2, h3 {
 }
 .tag-ore { color: var(--gold); border-color: rgba(244, 178, 56, 0.4); }
 .tag-component { color: var(--twink); border-color: rgba(95, 180, 255, 0.4); }
+.tag-weapon { color: var(--danger); border-color: rgba(255, 90, 79, 0.4); }
+.tag-commodity { color: var(--gold); border-color: rgba(244, 178, 56, 0.4); }
+.tag-item { color: var(--success); border-color: rgba(62, 207, 142, 0.4); }
 .tag-class { color: var(--text); border-color: rgba(255, 255, 255, 0.25); }
 
 /* ===== Forms ===== */
@@ -222,7 +225,40 @@ h1, h2, h3 {
 .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .field[hidden] { display: none; }
 .field.grow { flex: 1 1 260px; }
-.item-form .field-narrow { flex: 0 1 120px; }
+.item-form .field-narrow { flex: 0 1 110px; }
+.item-form { flex-direction: column; align-items: stretch; }
+.item-form > .btn { align-self: flex-start; }
+.item-form-row, .item-fields { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.item-form-row > .item-fields { flex: 1 1 100%; }
+.item-form .field-kind { flex: 0 1 220px; }
+.item-form .field.grow { flex: 2 1 240px; }
+.catalog-status { margin: 0; }
+
+/* ===== Vorschlagsliste (Combobox) ===== */
+/* clip-path würde die aufklappende Liste abschneiden */
+.panel.panel-unclipped { clip-path: none; z-index: 5; }
+.combo { position: relative; }
+.suggest {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  min-width: 260px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--panel-solid);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.6), var(--glow);
+}
+.suggest li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 12px; cursor: pointer; }
+.suggest li:hover, .suggest li.active { background: rgba(232, 118, 42, 0.16); }
+.suggest-name { font-weight: 600; }
+.suggest-meta { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
+.suggest li.suggest-more { color: var(--muted); font-size: 0.85rem; cursor: default; background: none; }
 .field > span { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.15em; color: var(--muted); }
 
 input, select {
@@ -233,6 +269,7 @@ input, select {
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 0;
   padding: 9px 12px;
+  height: 46px; /* Inputs und Selects gleich hoch */
   outline: none;
   transition: border-color .15s, box-shadow .15s;
 }
@@ -424,5 +461,6 @@ select option, select optgroup { background: var(--panel-solid); color: var(--te
   .card-head > .item-actions { width: 100%; justify-content: stretch; }
   .item-actions > * { flex: 1; }
   .deadline-form .field { flex: 1 1 100%; }
+  .item-form .field-kind { flex: 1 1 100%; }
   .roll-buttons .btn { flex: 1; }
 }
