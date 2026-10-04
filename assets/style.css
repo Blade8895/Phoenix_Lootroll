@@ -349,6 +349,7 @@ select option, select optgroup { background: var(--panel-solid); color: var(--te
 .kind-main { color: var(--orange); }
 .kind-twink { color: var(--twink); }
 .roll-value { font-family: var(--font-head); font-weight: 700; text-align: right; }
+.roll-exact { cursor: help; }
 .roll.winner .roll-value { color: var(--gold); text-shadow: 0 0 10px rgba(244, 178, 56, 0.6); }
 
 .error-text { color: var(--danger); }

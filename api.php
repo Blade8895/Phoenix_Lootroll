@@ -199,7 +199,7 @@ function list_detail(int $id): array
     $stmt->execute([$id]);
     $byItem = [];
     foreach ($stmt->fetchAll() as $roll) {
-        $roll['value'] = $roll['value'] === null ? null : (int)$roll['value'];
+        $roll['value'] = $roll['value'] === null ? null : round((float)$roll['value'], 2);
         $byItem[$roll['item_id']][] = $roll;
     }
 
@@ -464,7 +464,7 @@ switch ($action) {
         }
         try {
             $pdo->prepare('INSERT INTO rolls (item_id, username, kind, value, created_at) VALUES (?, ?, ?, ?, ?)')
-                ->execute([(int)$input['item_id'], $user, $kind, $kind === 'pass' ? null : random_int(0, ROLL_MAX[$kind]), $now]);
+                ->execute([(int)$input['item_id'], $user, $kind, $kind === 'pass' ? null : random_int(0, ROLL_MAX[$kind] * 100) / 100, $now]);
         } catch (PDOException $e) {
             if (strpos($e->getMessage(), 'UNIQUE') !== false) {
                 fail('Du hast für dieses Item bereits entschieden.', 409);

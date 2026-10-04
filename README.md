@@ -10,7 +10,7 @@ Einfache Loot-Verteilung im Stil des alten WoW-Need-Rolls – für Star-Citizen-
   - **Item**: Item-Name → Typ (Pistole, Sturmgewehr, Brustpanzerung, Undersuit …) → Rüstungsklasse (bei Rüstung) → Hersteller → Anzahl
   - Namensfelder mit Vorschlagsliste, die sich beim Tippen verkleinert; bei Auswahl werden Klasse/Grade/Size/Typ automatisch ausgefüllt. Unbekannte Namen können frei eingetragen werden.
 - Jede Liste hat eine **Pflicht-Deadline**; danach endet das Würfeln automatisch (der Ersteller kann verlängern)
-- Nach „Speichern & freigeben“ entscheidet jeder bis zur Deadline **einmal pro Item**: **Priorität 0–100**, **Gier 0–50** oder **Kein Interesse** (kann bis zur Deadline zurückgenommen werden)
+- Nach „Speichern & freigeben“ entscheidet jeder bis zur Deadline **einmal pro Item**: **Priorität 0–100**, **Gier 0–50** (Wurf mit 2 Nachkommastellen, angezeigt ganzzahlig – Mouseover zeigt den genauen Wert) oder **Kein Interesse** (kann bis zur Deadline zurückgenommen werden)
 - Im Listen-Kopf steht, wer schon abgestimmt hat (✔ = bei allen offenen Items entschieden)
 - Würfe werden serverseitig erzeugt; Priorität schlägt Gier, sonst gewinnt der höchste Wert (Gleichstand wird angezeigt)
 - Ersteller kann Items als **erledigt** markieren, die Verteilung abschließen, die Liste **archivieren**/wiederherstellen oder löschen

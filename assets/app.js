@@ -12,6 +12,11 @@
   const SUGGEST_LIMIT = 60;
   // Interne Schlüssel main/twink bleiben, angezeigt wird Priorität/Gier.
   const KIND_LABEL = { main: 'Priorität', twink: 'Gier', pass: 'Kein Interesse' };
+
+  /** Würfe haben 2 Nachkommastellen (weniger Gleichstände), angezeigt wird nur der ganzzahlige Teil. */
+  const rollShort = (value) => String(Math.floor(value));
+  const rollFull = (value) => Number(value).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const rollValue = (value, cls) => h('span', { class: cls, title: `Wurf: ${rollFull(value)}` }, rollShort(value));
   // API relativ zum Skript auflösen – funktioniert auch, wenn die Seite ohne "/" am Ende aufgerufen wird.
   const API_URL = new URL('../api.php', document.currentScript.src).href;
 
@@ -605,7 +610,7 @@
     const roll = async (kind) => {
       const updated = await post('roll', { item_id: item.id, kind });
       const mine = updated && updated.items.find((i) => i.id === item.id).rolls.find((r) => sameUser(r.username, user));
-      if (mine) toast(mine.kind === 'pass' ? `${item.name}: Kein Interesse` : `${item.name}: ${KIND_LABEL[mine.kind]}-Wurf ${mine.value}`);
+      if (mine) toast(mine.kind === 'pass' ? `${item.name}: Kein Interesse` : `${item.name}: ${KIND_LABEL[mine.kind]}-Wurf ${rollShort(mine.value)}`);
     };
 
     const actions = [];
@@ -632,7 +637,7 @@
         }, '↺ Doch würfeln'));
       }
     } else if (myRoll) {
-      actions.push(h('span', { class: 'my-roll' }, `Dein Wurf: ${myRoll.value} (${KIND_LABEL[myRoll.kind]})`));
+      actions.push(h('span', { class: 'my-roll' }, 'Dein Wurf: ', rollValue(myRoll.value, 'roll-exact'), ` (${KIND_LABEL[myRoll.kind]})`));
     }
     if (isOwner && list.phase !== 'draft' && !list.archived) {
       actions.push(h('button', {
@@ -647,7 +652,7 @@
       return h('li', { class: `roll${isWinner ? ' winner' : ''}${sameUser(r.username, user) ? ' mine' : ''}` },
         h('span', { class: 'roll-name' }, isWinner ? '👑 ' : '', r.username),
         h('span', { class: `roll-kind kind-${r.kind}` }, KIND_LABEL[r.kind]),
-        h('span', { class: 'roll-value' }, r.value),
+        rollValue(r.value, 'roll-value roll-exact'),
       );
     });
 
